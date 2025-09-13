@@ -29,22 +29,20 @@ def sample_posterior(
 
 
 
-    # constants
     N = 30 # number of particles kept at each iteration
     round = 0  # index for ABC rounds
     Nsim = 0 # number of simulations of SDE model
     stopping_threshold = 1000
     distance_calculator = distance_calculator_class(data, timestep)
     delta = 0 # the distasnce tolerance level for accepting particles
-    best_distances = [np.inf]*int(np.ceil(threshold_percentile*N))   # stores the p'th percentile of smallest distances for new delta selection
     particles = np.full((N,4),0)
     weights = np.full(N,0)
+    distances_list = [] # unordered list of particle distances
 
 
 
     # pilot study for initial_threshold
     random_particles = prior.rvs(N)
-    distances_list = []
     def simulate_and_compute_distance(particle):
         trajectory_simulation = model_simulator(X0, particle, timestep, len(data)-1)
         distance = distance_calculator.compare_trajectory(trajectory_simulation)
@@ -93,7 +91,7 @@ def sample_posterior(
 
     while  Nsim < stopping_threshold:
         round += 1
-        delta = np.percentile(best_distances, threshold_percentile*100)
+        delta = np.percentile(distances_list, threshold_percentile*100)
         new_particles = np.full(N,0)
         new_weights = np.full(N,0)
         old_particle_selector = stats.rv_discrete(particles, weights)  # select random particle
@@ -106,35 +104,34 @@ def sample_posterior(
         covar = 0.5 * (covar + covar.T)
         sigma = 2 * covar  # covariance matrix
 
-        def generate_perturbed_particle():
+        def generate_perturbed_particle(i):
             distance = np.inf
             localNsim = 0
             while distance > delta:
-                theta = old_particle_selector.rvs()[0]
+                theta = old_particle_selector.rvs()
                 proposal_sampler = stats.multivariate_normal(mean=theta, cov=sigma)
-                
                 new_theta = proposal_sampler.rvs()
                 if prior.pdf(new_theta) == 0:
                     continue
                 trajectory_simulation = model_simulator(X0, new_theta, timestep, len(data)-1)
                 localNsim += 1
                 distance = distance_calculator.compare_trajectory(trajectory_simulation)
-            return new_theta, localNsim, distance
+            return new_theta, localNsim, distance, i
 
         # generate N new particles
         new_particles = np.empty(0)
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_index = {
-                executor.submit(generate_perturbed_particle) : i
+            futures = [
+                executor.submit(generate_perturbed_particle, i)
                 for i in range(N)
-            }
+            ]
             for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="ABC round {}".format(round)):
-                new_particle, localNsim, distance = future.result()
-                i = future_to_index[future]
+                print(type(future))
+                new_particle, localNsim, distance, i = future.result()
                 Nsim += localNsim
                 distances_list.append(distance)
 
-                new_particles[i] = (new_particle)
+                new_particles[i] = new_particle
                 temp = np.fromfunction(
                     lambda i: weights[i]*stats.multivariate_normal(mean=particles[i],cov=sigma).pdf(new_particle)
                     )
