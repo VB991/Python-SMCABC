@@ -32,12 +32,12 @@ def sample_posterior(
     N = 30 # number of particles kept at each iteration
     round = 0  # index for ABC rounds
     Nsim = 0 # number of simulations of SDE model
-    stopping_threshold = 1000
+    stopping_threshold = 100
     distance_calculator = distance_calculator_class(data, timestep)
-    delta = 0 # the distasnce tolerance level for accepting particles
-    particles = np.full((N,4),0)
-    weights = np.full(N,0)
-    distances_list = [] # unordered list of particle distances
+    delta = 0 # the distance tolerance level for accepting particles
+    particles = np.zeros((N,4))  # array of particles
+    weights = np.zeros(N)  # weights for particles
+    distances_list = []  # unordered list of particle distances
 
 
 
@@ -62,8 +62,9 @@ def sample_posterior(
 
     # initial ABC round
     round += 1
+    distances_list = []  # reset distance list
 
-    def generate_particle():
+    def generate_particle(i):
         distance = np.inf # distance of simulation from data
         localNsim = 0
         while distance > delta:
@@ -71,30 +72,31 @@ def sample_posterior(
             trajectory_simulation = model_simulator(X0, trial_parameter, timestep, len(data)-1)
             distance = distance_calculator.compare_trajectory(trajectory_simulation)
             localNsim += 1
-        return trial_parameter, localNsim, distance
+        return trial_parameter, localNsim, distance, i
     
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [
-            executor.submit(generate_particle)
-            for particle in random_particles
+            executor.submit(generate_particle,i)
+            for i in range(N)
         ]
-        for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="Initial ABC round"):
-            trial_parameter, localNsim, distance = future.result()
+        for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="ABC round 1"):
+            parameter, localNsim, distance, i = future.result()
             Nsim += localNsim
             distances_list.append(distance)
+            particles[i] = parameter
 
     weights = np.full(N,1/N)
 
 
 
     # further ABC rounds
-
     while  Nsim < stopping_threshold:
         round += 1
         delta = np.percentile(distances_list, threshold_percentile*100)
-        new_particles = np.full(N,0)
-        new_weights = np.full(N,0)
-        old_particle_selector = stats.rv_discrete(particles, weights)  # select random particle
+        new_particles = np.zeros((N,4))
+        new_weights = np.zeros(N)
+        distances_list = []
+        old_particle_selector = stats.rv_discrete(values = (np.arange(0,30), weights))  # select index for random particle
         distance = np.inf
 
         # calculate covariance matrix for MVN perturbation kernel; empirical covariance
@@ -108,7 +110,7 @@ def sample_posterior(
             distance = np.inf
             localNsim = 0
             while distance > delta:
-                theta = old_particle_selector.rvs()
+                theta = particles[old_particle_selector.rvs()]
                 proposal_sampler = stats.multivariate_normal(mean=theta, cov=sigma)
                 new_theta = proposal_sampler.rvs()
                 if prior.pdf(new_theta) == 0:
@@ -119,22 +121,20 @@ def sample_posterior(
             return new_theta, localNsim, distance, i
 
         # generate N new particles
-        new_particles = np.empty(0)
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = [
                 executor.submit(generate_perturbed_particle, i)
                 for i in range(N)
             ]
             for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="ABC round {}".format(round)):
-                print(type(future))
                 new_particle, localNsim, distance, i = future.result()
                 Nsim += localNsim
                 distances_list.append(distance)
 
                 new_particles[i] = new_particle
-                temp = np.fromfunction(
-                    lambda i: weights[i]*stats.multivariate_normal(mean=particles[i],cov=sigma).pdf(new_particle)
-                    )
+                temp = np.array([
+                    (lambda i: weights[int(i)]*stats.multivariate_normal(mean=particles[i],cov=sigma).pdf(new_particle))(i) for i in range(N)
+                    ])
                 new_weights[i] = prior.pdf(new_particle) / np.sum(temp)
             
         particles = new_particles

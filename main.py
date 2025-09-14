@@ -65,4 +65,5 @@ samples, weights = SMCABC.sample_posterior(
     threshold_percentile=0.5,
     prior=MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6),
     data = data, timestep=0.1, distance_calculator_class=distances.CalculateModelBasedDistance)
-plt.hist(samples)
+print(samples)
+print(np.mean(samples, axis=0))
