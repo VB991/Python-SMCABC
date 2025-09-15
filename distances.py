@@ -27,21 +27,26 @@ class CalculateDistance(ABC):
 class CalculateModelBasedDistance(CalculateDistance):
     """Calculate trajectory distance using estimated density and spectral density as summaries."""
     def _summarise(self, trajectory):
-        kde_pdf = stats.gaussian_kde(trajectory).pdf
         frequencies, spectral_density = signal.periodogram(trajectory, self.timestep)
-        kde_support = [trajectory.min(),trajectory.max()]
-        return (kde_support, kde_pdf, frequencies, spectral_density)
+        kde = stats.gaussian_kde(trajectory)
+        kde_support = np.linspace(trajectory.min(), trajectory.max(), 1000)  # fixed grid
+        kde_values = kde.evaluate(kde_support)
+        return (kde_support, kde_values, frequencies, spectral_density)
 
     def _distance_from_summary(self, simulation_summary):
-        support2, kde_pdf2, frequencies2, spectral_density2 = simulation_summary
-        support1, kde_pdf1, frequencies1, spectral_density1 = self.summary
+        support2, kde_values2, frequencies2, spectral_density2 = simulation_summary
+        support1, kde_values1, frequencies1, spectral_density1 = self.summary
         if (frequencies1 != frequencies2).all():
             raise ValueError("Periodogram frequencies do not match. Ensure that the time duration of both trajectories is the same.")
-        
-        lb = min(support1[0],support2[0])
-        ub = max(support1[1],support2[1])
-        
-        pdf_distance = integrate.quad(lambda x: np.abs(kde_pdf1(x) - kde_pdf2(x)), lb, ub)[0]
+
+        lb = min(support1[0], support2[0])
+        ub = max(support1[1], support2[1])
+        grid = np.linspace(lb, ub, 1000) # grid for sampmles for estimated density
+
+        kde1_interp = np.interp(grid, support1, kde_values1)
+        kde2_interp = np.interp(grid, support2, kde_values2)
+
+        pdf_distance = integrate.trapezoid(np.abs(kde1_interp - kde2_interp), grid)
         spectral_density_distance = integrate.trapezoid(y = np.abs(spectral_density1 - spectral_density2), x = frequencies1)
         alpha = np.abs(integrate.trapezoid(y = spectral_density1, x = frequencies1))
         

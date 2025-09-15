@@ -1,16 +1,92 @@
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
-import bisect
 import tqdm # for progress bars
 import concurrent.futures
 
 import simulators
 import distances
 
+# global variables to be used by worker processes
+X0 = None
+TIMESTEP = None
+DATA_LENGTH = None
+MODEL_SIMULATOR = None
+DISTANCE_CALCULATOR = None
+PRIOR = None
+DISTANCE_THRESHOLD = None
+KERNEL_COVARIANCE = None
+RANDOM_PARTICLE_SELECTOR = None
+PARTICLES = None
+
+def init_globals(x0, 
+                timestep,
+                data_length, 
+                model_simulator, 
+                distance_calculator, 
+                prior, 
+                distance_threshold,
+                kernel_covariance, 
+                random_particle_selector, 
+                particles):
+    global X0, TIMESTEP, DATA_LENGTH, MODEL_SIMULATOR, DISTANCE_CALCULATOR, PRIOR, DISTANCE_THRESHOLD, KERNEL_COVARIANCE, RANDOM_PARTICLE_SELECTOR, PARTICLES
+    X0 = x0
+    TIMESTEP = timestep
+    DATA_LENGTH = data_length
+    MODEL_SIMULATOR = model_simulator
+    DISTANCE_CALCULATOR = distance_calculator
+    PRIOR = prior
+    DISTANCE_THRESHOLD = distance_threshold
+    KERNEL_COVARIANCE = kernel_covariance
+    RANDOM_PARTICLE_SELECTOR = random_particle_selector
+    PARTICLES = particles
+
+# worker processes for SMC-ABC
+
+def pilot_study_worker(indexes):
+    random_particles = PRIOR.rvs(len(indexes))
+    results = []
+    for particle in random_particles:
+        traj = MODEL_SIMULATOR(X0, particle, TIMESTEP, DATA_LENGTH)
+        dist = DISTANCE_CALCULATOR.compare_trajectory(traj)
+        results.append(dist)
+    return results
+
+def initial_ABC_worker(indexes):
+    results = []
+    for i in indexes:
+        dist = np.inf
+        localNsim = 0
+        while dist > DISTANCE_THRESHOLD:
+            trial_parameter = PRIOR.rvs()[0]
+            traj = MODEL_SIMULATOR(X0, trial_parameter, TIMESTEP, DATA_LENGTH)
+            dist = DISTANCE_CALCULATOR.compare_trajectory(traj)
+            localNsim += 1
+        results.append((trial_parameter, localNsim, dist, i))
+    return results
+
+def SMCABC_worker(indexes):
+    results = []
+    for i in indexes:
+        distance = np.inf
+        localNsim = 0
+        while distance > DISTANCE_THRESHOLD:
+            theta = PARTICLES[RANDOM_PARTICLE_SELECTOR.rvs()]
+            proposal_sampler = stats.multivariate_normal(mean=theta, cov=KERNEL_COVARIANCE)
+            new_theta = proposal_sampler.rvs()
+            if PRIOR.pdf(new_theta) == 0:
+                continue
+            trajectory_simulation = MODEL_SIMULATOR(X0, new_theta, TIMESTEP, DATA_LENGTH)
+            localNsim += 1
+            distance = DISTANCE_CALCULATOR.compare_trajectory(trajectory_simulation)
+        results.append((new_theta, localNsim, distance, i))
+    return results
+
+
+
 def sample_posterior(
            data: np.array,
-           X0: float,
+           initial_value: float,
            timestep: float,
            threshold_percentile: float,
            prior: stats.rv_continuous,
@@ -27,109 +103,77 @@ def sample_posterior(
         distance_function (callable, optional): Distance function and summary statistic to be used in ABC. Defaults to distances.model_based_summary_distance.
     """
 
-
-
-    N = 30 # number of particles kept at each iteration
-    round = 0  # index for ABC rounds
+    N = 100 # number of particles kept at each iteration
     Nsim = 0 # number of simulations of SDE model
-    stopping_threshold = 100
+    stopping_threshold = 1000  # maximum number of simulations
+    batch_size = 10
+
+    round = 0  # index for ABC rounds
     distance_calculator = distance_calculator_class(data, timestep)
-    delta = 0 # the distance tolerance level for accepting particles
+    distance_threshold = 0 # the distance tolerance level for accepting particles
     particles = np.zeros((N,4))  # array of particles
     weights = np.zeros(N)  # weights for particles
     distances_list = []  # unordered list of particle distances
 
+    init_globals(initial_value, timestep, len(data), model_simulator, distance_calculator, prior, None, None, None, None)
 
+    # ----- Pilot study for initial threshold -----
+    with concurrent.futures.ProcessPoolExecutor(
+        initializer=init_globals,
+        initargs=(initial_value, timestep, len(data), model_simulator, distance_calculator, prior, None, None, None, None)
+    ) as executor:
+        batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
+        futures = [executor.submit(pilot_study_worker, b) for b in batches]
+        for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=len(futures),desc="Pilot study for initial threshold"):
+            distances = future.result()
+            distances_list = distances_list + distances
+    distance_threshold = np.percentile(distances_list, threshold_percentile*100)
 
-    # pilot study for initial_threshold
-    random_particles = prior.rvs(N)
-    def simulate_and_compute_distance(particle):
-        trajectory_simulation = model_simulator(X0, particle, timestep, len(data)-1)
-        distance = distance_calculator.compare_trajectory(trajectory_simulation)
-        return distance
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(simulate_and_compute_distance, particle)
-            for particle in random_particles
-        ]
-        for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="Pilot study for initial threshold"):
-            distance = future.result()
-            distances_list.append(distance)
-    delta = np.percentile(distances_list, threshold_percentile*100)
-
-
-
-    # initial ABC round
+    # ----- Initial ABC round -----
     round += 1
     distances_list = []  # reset distance list
-
-    def generate_particle(i):
-        distance = np.inf # distance of simulation from data
-        localNsim = 0
-        while distance > delta:
-            trial_parameter = prior.rvs()[0]   # sample from prior
-            trajectory_simulation = model_simulator(X0, trial_parameter, timestep, len(data)-1)
-            distance = distance_calculator.compare_trajectory(trajectory_simulation)
-            localNsim += 1
-        return trial_parameter, localNsim, distance, i
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(generate_particle,i)
-            for i in range(N)
-        ]
-        for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="ABC round 1"):
-            parameter, localNsim, distance, i = future.result()
-            Nsim += localNsim
-            distances_list.append(distance)
-            particles[i] = parameter
-
+    with concurrent.futures.ProcessPoolExecutor(
+        initializer=init_globals,
+        initargs=(initial_value, timestep, len(data), model_simulator, distance_calculator, prior, distance_threshold, None, None, None)
+    ) as executor:
+        batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
+        futures = [executor.submit(initial_ABC_worker, b) for b in batches]
+        for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=len(futures),desc="ABC round 1"):
+            for result in future.result():
+                parameter, localNsim, distance, i = result
+                Nsim += localNsim
+                distances_list.append(distance)
+                particles[i] = parameter
     weights = np.full(N,1/N)
 
-
-
-    # further ABC rounds
+    # ------ Further ABC rounds -----
     while  Nsim < stopping_threshold:
         round += 1
-        delta = np.percentile(distances_list, threshold_percentile*100)
+        distance_threshold = np.percentile(distances_list, threshold_percentile*100)
         new_particles = np.zeros((N,4))
         new_weights = np.zeros(N)
         distances_list = []
-        old_particle_selector = stats.rv_discrete(values = (np.arange(0,30), weights))  # select index for random particle
+        old_particle_selector = stats.rv_discrete(values = (np.arange(0,N), weights))  # select index for random particle
         distance = np.inf
-
+    
         # calculate covariance matrix for MVN perturbation kernel; empirical covariance
-        covar = particles - weights@particles  # subtract weighted mean
-        covar = covar.T @ (covar*weights[:,None])
-        covar = covar / (1 - np.sum(weights**2))
-        covar = 0.5 * (covar + covar.T)
-        sigma = 2 * covar  # covariance matrix
+        c = particles - weights@particles  # subtract weighted mean
+        c = c.T @ (c*weights[:,None])
+        c = c / (1 - np.sum(weights**2))
+        c = 0.5 * (c + c.T)
+        sigma = 2 * c  # covariance matrix
 
-        def generate_perturbed_particle(i):
-            distance = np.inf
-            localNsim = 0
-            while distance > delta:
-                theta = particles[old_particle_selector.rvs()]
-                proposal_sampler = stats.multivariate_normal(mean=theta, cov=sigma)
-                new_theta = proposal_sampler.rvs()
-                if prior.pdf(new_theta) == 0:
-                    continue
-                trajectory_simulation = model_simulator(X0, new_theta, timestep, len(data)-1)
-                localNsim += 1
-                distance = distance_calculator.compare_trajectory(trajectory_simulation)
-            return new_theta, localNsim, distance, i
-
-        # generate N new particles
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(generate_perturbed_particle, i)
-                for i in range(N)
-            ]
-            for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=N,desc="ABC round {}".format(round)):
-                new_particle, localNsim, distance, i = future.result()
-                Nsim += localNsim
-                distances_list.append(distance)
+        with concurrent.futures.ProcessPoolExecutor(
+            initializer=init_globals,
+            initargs=(initial_value, timestep, len(data), model_simulator, distance_calculator, prior, distance_threshold, sigma, old_particle_selector, particles)
+        ) as executor:
+            batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
+            futures = [executor.submit(SMCABC_worker, b) for b in batches]
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures),total=len(futures),desc="ABC round {}".format(round)):
+                for result in future.result():
+                    new_particle, localNsim, distance, i = result
+                    Nsim += localNsim
+                    distances_list.append(distance)
 
                 new_particles[i] = new_particle
                 temp = np.array([

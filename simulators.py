@@ -4,14 +4,16 @@ from numba import njit
 # trajectory simulation of FHN model using Strang splitting scheme
 # returns time-series for the data
 @njit
-def FHN_model(X0, theta, timestep, N):
+def FHN_model(initial_value, theta, timestep, number_of_samples):
     # parameters for the FitzHugh-Nagumo model
     # theta = [epsilon, gamma, beta, sigma]
+    X0 = initial_value
+    N = number_of_samples
+    delta = timestep
     epsilon = theta[0]
     gamma = theta[1]
     beta = theta[2]
     sigma = theta[3]
-    delta = timestep
 
     # parts for the linear SDE
     # E(delta)
@@ -46,10 +48,10 @@ def FHN_model(X0, theta, timestep, N):
 
     # simulating trajectory
     # X[i] = [v_i, u_i]
-    X = np.zeros((N+1, 2))
+    X = np.zeros((N, 2))
     X[0] = X0
     L = np.linalg.cholesky(C)
-    for i in range(N):
+    for i in range(N-1):
         a = h(X[i], delta/2)
         noise = L@np.random.normal(0,1,2)
         b = E@a + noise

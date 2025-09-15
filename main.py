@@ -5,10 +5,6 @@ import distances
 import simulators
 import SMCABC
 
-data = simulators.FHN_model(X0 = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.08, N = 625)
-plt.plot(data)
-plt.show()
-
 class MultivariateUniform:
     def __init__(self, bounds, second_upper):
         """
@@ -60,10 +56,19 @@ class MultivariateUniform:
         # Support for second variable depends on epsilon
         return self.bounds, self.second_upper
 
-samples, weights = SMCABC.sample_posterior(
-    X0=[0,0], 
-    threshold_percentile=0.5,
-    prior=MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6),
-    data = data, timestep=0.1, distance_calculator_class=distances.CalculateModelBasedDistance)
-print(samples)
-print(np.mean(samples, axis=0))
+
+def main():
+    data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.08, number_of_samples = 625)
+    plt.plot(data)
+    plt.show()
+
+    samples, weights = SMCABC.sample_posterior(
+        initial_value=[0,0], 
+        threshold_percentile=0.5,
+        prior=MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6),
+        data = data, timestep=0.1, distance_calculator_class=distances.CalculateModelBasedDistance)
+    print(samples)
+    print(np.mean(samples, axis=0))
+
+if __name__ == "__main__":
+    main()
