@@ -69,6 +69,14 @@ def main():
         data = data, timestep=0.1, distance_calculator_class=distances.CalculateModelBasedDistance)
     print(samples)
     print(np.mean(samples, axis=0))
+    plt.hist(samples[:,0], bins=30)
+    plt.show()
+    plt.hist(samples[:,1], bins=30)
+    plt.show()
+    plt.hist(samples[:,2], bins=30)
+    plt.show()
+    plt.hist(samples[:,3], bins=30)
+    plt.show()
 
 if __name__ == "__main__":
     main()
