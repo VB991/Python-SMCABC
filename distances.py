@@ -44,7 +44,7 @@ class CalculateModelBasedDistance(CalculateDistance):
 
         lb = min(support1[0], support2[0])
         ub = max(support1[1], support2[1])
-        grid = np.linspace(lb, ub, 1000) # grid for sampmles for estimated density
+        grid = np.linspace(lb, ub, 1000) # Grid for sampmles for estimated density
 
         kde1_interp = np.interp(grid, support1, kde_values1)
         kde2_interp = np.interp(grid, support2, kde_values2)
@@ -93,19 +93,19 @@ class PEN(nn.Module):
         blocks = blocks.reshape(-1, self.k + 1)
 
         # Encode each block and reshape back to (batch_size, num_blocks, encoded_dim)
-        encoded = nn.functional.relu(self.encoder_in(blocks))
-        encoded = nn.functional.relu(self.encoder_hidden(encoded))
-        encoded = nn.functional.relu(self.encoder_out(encoded))
-        encoded = encoded.reshape(batch_size, num_blocks, encoded.size(-1))
+        encoded_blocks = nn.functional.relu(self.encoder_in(blocks))
+        encoded_blocks = nn.functional.relu(self.encoder_hidden(encoded_blocks))
+        encoded_blocks = nn.functional.relu(self.encoder_out(encoded_blocks))
+        encoded_blocks = encoded_blocks.reshape(batch_size, num_blocks, encoded_blocks.size(-1))
 
         # Sum the representations across the timestamp axis
-        aggregated = encoded.sum(dim=1)
+        aggregated = encoded_blocks.sum(dim=1)
 
         # Append the summed representations to the first k raw values
         first_k = x[:, :self.k].to(aggregated.dtype)  # Ensure same dtype of entries of x and representations
-        encoded_sequence = torch.cat([first_k, aggregated], dim=1)
 
-        return encoded_sequence
+        return torch.cat([first_k, aggregated], dim=1)
+    
 
     def forward(self, x):
         '''Forward pass of PEN network. Input is a batch of time series.'''
@@ -121,10 +121,78 @@ class PEN(nn.Module):
 
 
 class CalculatePENDistance(CalculateDistance):
-    def __init__(self, real_trajectory, timestep, parameter_dim):
+    def __init__(self, real_trajectory, timestep, parameter_dim, training_data_x, training_data_params, batch_size=32, device=None):
         super().__init__(real_trajectory, timestep)
-        self.summary = PEN(parameter_dim)
 
-    def _train_model(self, model_simulator: callable, batch_size=32, n_epochs=1000):
-        batches = list([i,min(i+batch_size-1,n_epochs)] for i in range(0,n_epochs,batch_size))
-        data = 
+        self.summaryNN = PEN(parameter_dim)
+        if device is not None:
+            self.summaryNN.to(device)
+
+        self._train_model(training_data_x=training_data_x, training_data_params=training_data_params, batch_size=batch_size)
+        with torch.no_grad():
+            x = torch.from_numpy(self.real_trajectory).float().unsqueeze(0).todevice(device)
+            self.summary = self.summaryNN(x).squeeze(0) # 
+
+
+    def _train_model(self, training_data_x, training_data_params, batch_size=32, num_epochs=10):
+        training_array = np.asarray(training_data_x)
+        param_array = np.asarray(training_data_params)
+        if training_array.ndim != 1:
+            raise ValueError("training_data must be a 1D numpy array or vector")
+        if param_array.ndim != 2:
+            raise ValueError("training_data_params must be a 2D numpy array")
+
+        # Ensure batch size doesn't exceed sample size, and ensure training data matches
+        num_samples = training_array.shape[0]
+        if num_samples < batch_size:
+            batch_size = num_samples
+        if param_array.shape[0] != num_samples:
+            raise ValueError(
+                "training_data_params must have the same number of rows as training_data_x has samples"
+            )
+
+        # Create (first, last) index pairs for each training batch
+        batches = [
+            (first, min(first + batch_size, num_samples))
+            for first in range(0, num_samples, batch_size)
+        ]
+
+        tensor_batches = []
+        tensor_param_batches = []
+        for first, last in batches:
+            batch_np = training_array[first:last]
+            batch_tensor = torch.from_numpy(batch_np.copy()).float().unsqueeze(0)
+            tensor_batches.append(batch_tensor)
+
+            param_np = param_array[first:last]
+            param_tensor = torch.from_numpy(param_np.copy()).float().unsqueeze(0)
+            tensor_param_batches.append(param_tensor)
+
+        def batch_mean_squared_euclidean(pred, target):
+            sample_loss = (pred - target).pow(2).sum(dim=1)
+            return sample_loss.mean()
+
+        # Find device and set up optimiser
+        device = next(self.summaryNN.parameters()).device
+        optimizer = torch.optim.Adam(self.summaryNN.parameters(), lr=1e-3)
+
+        # Training loop
+        self.summaryNN.train()
+        for _ in range(num_epochs):
+            for input_batch, param_batch in zip(tensor_batches, tensor_param_batches):
+                input_batch = input_batch.to(device)
+                param_batch = param_batch.to(device)
+                target = param_batch.squeeze(0)  # shape (batch_len, param_dim)
+                prediction = self.summaryNN(input_batch).squeeze(0)
+                loss = batch_mean_squared_euclidean(prediction, target)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+        # Switch back to evaluation mode
+        self.summaryNN.eval()
+
+
+    def _calculate_summaries_distance(self, simulation_summary):
+        # Euclidean distance between summary statistics
+        diff = self.summary - simulation_summary
+        return torch.linalg.norm(diff, ord=2).item()  # Return as float
