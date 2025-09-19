@@ -5,6 +5,7 @@ import concurrent.futures
 import tqdm
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 
 class CalculateDistance(ABC):
@@ -105,7 +106,7 @@ class PEN(nn.Module):
         first_k = x[:, :self.k].to(aggregated.dtype)  # Ensure same dtype of entries of x and representations
 
         return torch.cat([first_k, aggregated], dim=1)
-    
+
 
     def forward(self, x):
         '''Forward pass of PEN network. Input is a batch of time series.'''
@@ -121,78 +122,87 @@ class PEN(nn.Module):
 
 
 class CalculatePENDistance(CalculateDistance):
-    def __init__(self, real_trajectory, timestep, parameter_dim, training_data_x, training_data_params, batch_size=32, device=None):
+    def __init__(
+        self,
+        real_trajectory,
+        timestep,
+        parameter_dim,
+        training_data_x,
+        training_data_params,
+        markov_order=1,
+        batch_size=32,
+        num_epochs=10,
+        device=None,
+    ):
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self.summaryNN = PEN(parameter_dim=parameter_dim, markov_order=markov_order).to(self.device)
+
+        self._train_model(
+            training_data_x=training_data_x,
+            training_data_params=training_data_params,
+            batch_size=batch_size,
+            num_epochs=num_epochs,
+        )
+
         super().__init__(real_trajectory, timestep)
 
-        self.summaryNN = PEN(parameter_dim)
-        if device is not None:
-            self.summaryNN.to(device)
-
-        self._train_model(training_data_x=training_data_x, training_data_params=training_data_params, batch_size=batch_size)
-        with torch.no_grad():
-            x = torch.from_numpy(self.real_trajectory).float().unsqueeze(0).todevice(device)
-            self.summary = self.summaryNN(x).squeeze(0) # 
 
 
     def _train_model(self, training_data_x, training_data_params, batch_size=32, num_epochs=10):
-        training_array = np.asarray(training_data_x)
-        param_array = np.asarray(training_data_params)
-        if training_array.ndim != 1:
-            raise ValueError("training_data must be a 1D numpy array or vector")
+        training_array = np.asarray(training_data_x, dtype=np.float32)
+        param_array = np.asarray(training_data_params, dtype=np.float32)
+
+        if training_array.ndim != 2:
+            raise ValueError("training_data_x must be a 2D array of shape (num_samples, sequence_length)")
         if param_array.ndim != 2:
-            raise ValueError("training_data_params must be a 2D numpy array")
+            raise ValueError("training_data_params must be a 2D array of shape (num_samples, parameter_dim)")
+        if training_array.shape[0] != param_array.shape[0]:
+            raise ValueError("training_data_x and training_data_params must have the same number of samples")
 
-        # Ensure batch size doesn't exceed sample size, and ensure training data matches
-        num_samples = training_array.shape[0]
-        if num_samples < batch_size:
-            batch_size = num_samples
-        if param_array.shape[0] != num_samples:
-            raise ValueError(
-                "training_data_params must have the same number of rows as training_data_x has samples"
-            )
+        dataset = TensorDataset(
+            torch.from_numpy(training_array),
+            torch.from_numpy(param_array),
+        )
+        loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=True)
 
-        # Create (first, last) index pairs for each training batch
-        batches = [
-            (first, min(first + batch_size, num_samples))
-            for first in range(0, num_samples, batch_size)
-        ]
-
-        tensor_batches = []
-        tensor_param_batches = []
-        for first, last in batches:
-            batch_np = training_array[first:last]
-            batch_tensor = torch.from_numpy(batch_np.copy()).float().unsqueeze(0)
-            tensor_batches.append(batch_tensor)
-
-            param_np = param_array[first:last]
-            param_tensor = torch.from_numpy(param_np.copy()).float().unsqueeze(0)
-            tensor_param_batches.append(param_tensor)
-
-        def batch_mean_squared_euclidean(pred, target):
+        def mean_euclidean_squared(pred, target):
             sample_loss = (pred - target).pow(2).sum(dim=1)
             return sample_loss.mean()
 
-        # Find device and set up optimiser
-        device = next(self.summaryNN.parameters()).device
         optimizer = torch.optim.Adam(self.summaryNN.parameters(), lr=1e-3)
 
-        # Training loop
+        # Enter training
         self.summaryNN.train()
         for _ in range(num_epochs):
-            for input_batch, param_batch in zip(tensor_batches, tensor_param_batches):
-                input_batch = input_batch.to(device)
-                param_batch = param_batch.to(device)
-                target = param_batch.squeeze(0)  # shape (batch_len, param_dim)
-                prediction = self.summaryNN(input_batch).squeeze(0)
-                loss = batch_mean_squared_euclidean(prediction, target)
+            for batch_x, batch_y in loader:
+                batch_x = batch_x.to(self.device)
+                batch_y = batch_y.to(self.device)
+
+                preds = self.summaryNN(batch_x)
+                loss = mean_euclidean_squared(preds, batch_y)
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-        # Switch back to evaluation mode
+        # Exit training mode
         self.summaryNN.eval()
 
 
+    def _summarise(self, trajectory):
+        traj_tensor = torch.as_tensor(trajectory, dtype=torch.float32)
+        if traj_tensor.dim() == 1:
+            traj_tensor = traj_tensor.unsqueeze(0)
+        elif traj_tensor.dim() != 2:
+            raise ValueError("trajectory must be 1D or 2D with shape (batch, sequence_length)")
+
+        traj_tensor = traj_tensor.to(self.device)
+        with torch.no_grad():
+            summary = self.summaryNN(traj_tensor).squeeze(0).cpu()
+        return summary
+
+
     def _calculate_summaries_distance(self, simulation_summary):
-        # Euclidean distance between summary statistics
         diff = self.summary - simulation_summary
-        return torch.linalg.norm(diff, ord=2).item()  # Return as float
+        if not isinstance(diff, torch.Tensor):
+            diff = torch.as_tensor(diff, dtype=torch.float32)
+        return torch.linalg.norm(diff.float(), ord=2).item()
