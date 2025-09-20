@@ -3,7 +3,7 @@ from numba import njit
 
 # trajectory simulation of FHN model using Strang splitting scheme
 # returns time-series for the data
-@njit
+@njit(fastmath=True)
 def FHN_model(initial_value, theta, timestep, number_of_samples):
     # parameters for the FitzHugh-Nagumo model
     # theta = [epsilon, gamma, beta, sigma]
@@ -36,13 +36,17 @@ def FHN_model(initial_value, theta, timestep, number_of_samples):
     c12 = c21 = (coeff / epsilon) * (cos_term2 - 1)
     c22 = (coeff /2) * (cos_term2 + sqrt_kappa*sin_term2 + term1)
     C = np.array([[c11, c12], [c21, c22]])
+
     # non-linear ODE solution
-    def h(x, t):
+    t = delta/2
+    exp_term = np.exp(-2 * t / epsilon)
+    one_minus_exp = 1 - exp_term
+    def h(x):
         v = x[0]
         u = x[1]
-        exp_term = np.exp(-2 * t / epsilon)
+        sqr_arg = exp_term + (v**2)*one_minus_exp
         return np.array([
-            v / np.sqrt(exp_term + v**2 * (1 - exp_term)),
+            v / np.sqrt(sqr_arg),
             beta*t + u
         ])
 
@@ -52,8 +56,8 @@ def FHN_model(initial_value, theta, timestep, number_of_samples):
     X[0] = X0
     L = np.linalg.cholesky(C)
     for i in range(N-1):
-        a = h(X[i], delta/2)
+        a = h(X[i])
         noise = L@np.random.normal(0,1,2)
         b = E@a + noise
-        X[i+1] = h(b, delta/2)
+        X[i+1] = h(b, t)
     return X[:,0]  # return only the voltage time-series
