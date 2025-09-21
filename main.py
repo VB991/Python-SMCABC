@@ -60,13 +60,13 @@ class MultivariateUniform:
 def main():
     data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.08, number_of_samples = 625)
     plt.plot(data)
-    plt.show()
+    plt.show() 
+    dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
 
-    samples, weights = SMCABC.sample_posterior(
-        initial_value=[0,0], 
+    samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
         prior=MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6),
-        data = data, timestep=0.1, distance_calculator_class=distances.CalculateModelBasedDistance)
+        data = data, timestep=0.08, distance_calculator = dist_calc, num_samples=100, simulation_budget=10000)
     print(samples)
     print(np.mean(samples, axis=0))
     plt.hist(samples[:,0], bins=30)

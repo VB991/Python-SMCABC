@@ -76,28 +76,44 @@ def SMCABC_worker(indexes, distance_threshold, kernel_covariance, random_particl
 
 def sample_posterior(
     data: np.array,
-    initial_value: float,
     timestep: float,
     threshold_percentile: float,
     prior: stats.rv_continuous,
     model_simulator: callable = simulators.FHN_model,
-    distance_calculator_class: type = callable,
+    distance_calculator: type = callable,
+    num_samples: int = 100,
+    simulation_budget: int = 10000,
 ):
-    """Performs Sequential Monte Carlo ABC."""
+    """_summary_
 
-    N = 1000  # number of particles kept at each iteration
-    Nsim = 0  # number of simulations of SDE model
-    stopping_threshold = 10000  # maximum number of simulations
+    Args:
+        data (np.array): Real data time-series
+        timestep (float): Time distance between consecutive samples in data
+        threshold_percentile (float): Percentile (0,1) for updating distance threshold
+        prior (stats.rv_continuous): Prior distribution for parameter
+        model_simulator (callable, optional): Simulator for model expected to generate data from simulators module. Defaults to simulators.FHN_model.
+        distance_calculator (type, optional): Distance calculator instance from distance module. Defaults to callable.
+        num_samples (int, optional): Number of particles to use. Defaults to 1000.
+        simulation_budget (int, optional): Maximum number of model simulations to perform. Defaults to 10000.
+    Returns:
+        _type_: _description_
+    """
+
+    N = num_samples  # number of particles kept at each iteration
     batch_size = 1
+    Nsim = 0  # number of simulations of SDE model
 
+
+    particle_dimension = len(np.squeeze(np.atleast_1d(prior.rvs()))) # get the shape of the particles
     round_idx = 0  # index for ABC rounds
-    distance_calculator = distance_calculator_class(data, timestep)
+    initial_value = data[0]
     distance_threshold = None  # distance tolerance
-    particles = np.zeros((N, 4))
-    weights = np.zeros(N)
+    particles = np.empty((N, particle_dimension))
+    weights = np.empty(N)
     distances_list = []
 
     with concurrent.futures.ProcessPoolExecutor(
+        max_workers=None,
         initializer=init_globals,
         initargs=(initial_value, timestep, len(data), model_simulator, distance_calculator, prior),
     ) as executor:
@@ -121,10 +137,10 @@ def sample_posterior(
         weights = np.full(N, 1 / N)
 
         # Subsequent rounds
-        while Nsim < stopping_threshold:
+        while Nsim < simulation_budget:
             round_idx += 1
             distance_threshold = np.percentile(distances_list, threshold_percentile * 100)
-            new_particles = np.zeros((N, 4))
+            new_particles = np.empty((N, particle_dimension))
             distances_list = []
 
             # Build zero-mean kernel for this round
@@ -156,15 +172,13 @@ def sample_posterior(
                     distances_list.append(distance)
                     new_particles[idx] = new_particle
 
-            # Calculate new weights
-            # Using log-sum-exp trick for numerical stability
-            diffs = new_particles[:, None, :] - particles[None, :, :]
-            flat_diffs = diffs.reshape(-1, particles.shape[1])
-            log_kernel = zero_mean_kernel.logpdf(flat_diffs).reshape(N, N)
-            log_denominator = logsumexp(log_kernel, b=weights, axis=1)
-            denominators = np.exp(log_denominator)
-            numerators = prior.pdf(new_particles)
-            new_weights = numerators / np.maximum(denominators, 1e-300)
+            # Update weights
+            # For below: (new_particle, repeat, pdim) - (repeat, old_particle, pdim)
+            diffs = np.repeat(new_particles[:,None,:], repeats=N, axis=1) - np.repeat(particles[None,:,:], repeats=N, axis=0)
+            diffs = diffs.reshape(-1, particle_dimension)   # (new_particle, index, pdim) --> (new_particle*index, pdim)
+            kernel_vals = zero_mean_kernel.pdf(diffs).reshape(N, N)  # (new_particle, index) array of kernel values
+            denominators = np.sum(weights * kernel_vals, axis = 1)
+            new_weights = prior.pdf(new_particles) / denominators
 
             particles = new_particles
             weights = new_weights / np.sum(new_weights)
