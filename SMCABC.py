@@ -34,7 +34,7 @@ def pilot_study_worker(indexes):
     results = []
     for particle in random_particles:
         traj = MODEL_SIMULATOR(X0, particle, TIMESTEP, DATA_LENGTH)
-        dist = DISTANCE_CALCULATOR.compare_trajectory(traj)
+        dist = DISTANCE_CALCULATOR.eval(traj)
         results.append(dist)
     return results
 
@@ -47,7 +47,7 @@ def initial_ABC_worker(indexes, distance_threshold):
         while dist > distance_threshold:
             trial_parameter = PRIOR.rvs()[0]
             traj = MODEL_SIMULATOR(X0, trial_parameter, TIMESTEP, DATA_LENGTH)
-            dist = DISTANCE_CALCULATOR.compare_trajectory(traj)
+            dist = DISTANCE_CALCULATOR.eval(traj)
             local_nsim += 1
         results.append((trial_parameter, local_nsim, dist, i))
     return results
@@ -67,7 +67,7 @@ def SMCABC_worker(indexes, distance_threshold, kernel_covariance, random_particl
                 continue
             trajectory_simulation = MODEL_SIMULATOR(X0, new_theta, TIMESTEP, DATA_LENGTH)
             local_nsim += 1
-            distance = DISTANCE_CALCULATOR.compare_trajectory(trajectory_simulation)
+            distance = DISTANCE_CALCULATOR.eval(trajectory_simulation)
         results.append((new_theta, local_nsim, distance, i))
     return results
 

@@ -6,6 +6,7 @@ import tqdm
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from matplotlib import pyplot as plt
 
 
 class CalculateDistance(ABC):
@@ -22,40 +23,58 @@ class CalculateDistance(ABC):
         self.timestep = timestep
         self.summary = self._summarise(real_trajectory)
 
-    def compare_trajectory(self, simulation_trajectory):
-        summary = self._summarise(simulation_trajectory)
-        return self._calculate_summaries_distance(summary)
+    def eval(self, simulation_trajectory):
+        sim_summary = self._summarise(simulation_trajectory)
+        return self._calculate_summaries_distance(sim_summary)
 
 
 
 class CalculateModelBasedDistance(CalculateDistance):
     """Calculate trajectory distance using estimated density and spectral density as summaries."""
     def _summarise(self, trajectory):
-        frequencies, spectral_density = signal.periodogram(trajectory, self.timestep)
+        # Spectral density
+        frequencies, spectral_density = signal.periodogram(trajectory, 1/self.timestep)
+        kernel = np.ones()
+        
+        # Estimated PDF
         kde = stats.gaussian_kde(trajectory)
-        kde_support = np.linspace(trajectory.min(), trajectory.max(), 1000)  # fixed grid
-        kde_values = kde.evaluate(kde_support)
-        return (kde_support, kde_values, frequencies, spectral_density)
+        pad = 2*trajectory.std()
+        kde_support_ends = (trajectory.min()-pad, trajectory.max()+pad) 
+        # Grid for support, kde object, frequencies, and spectral density at frequencies
+        return (kde_support_ends, kde, frequencies, spectral_density)
 
     def _calculate_summaries_distance(self, simulation_summary):
-        support2, kde_values2, frequencies2, spectral_density2 = simulation_summary
-        support1, kde_values1, frequencies1, spectral_density1 = self.summary
-        if (frequencies1 != frequencies2).all():
+        ends1, kde1, frequencies1, spectral_density1 = self.summary
+        ends2, kde2, frequencies2, spectral_density2 = simulation_summary
+
+        if not np.allclose(frequencies1, frequencies2):
             raise ValueError("Periodogram frequencies do not match. Ensure that the time duration of both trajectories is the same.")
+        else:
+            freqs = frequencies1
 
-        lb = min(support1[0], support2[0])
-        ub = max(support1[1], support2[1])
-        grid = np.linspace(lb, ub, 1000) # Grid for sampmles for estimated density
+        # Evaluate kde over same grid
+        lb = min(ends1[0], ends2[0])
+        ub = max(ends1[1], ends2[1])   
+        grid = np.linspace(lb, ub, 1000)
+        kde1_values = kde1.evaluate(grid)
+        kde2_values = kde2.evaluate(grid)
 
-        kde1_interp = np.interp(grid, support1, kde_values1)
-        kde2_interp = np.interp(grid, support2, kde_values2)
+        plt.plot(grid, kde1_values)
+        plt.plot(grid, kde2_values)
+        plt.show()
+        plt.plot(frequencies1,spectral_density1)
+        plt.plot(frequencies2,spectral_density2)
+        plt.show()
 
-        pdf_distance = integrate.trapezoid(np.abs(kde1_interp - kde2_interp), grid)
-        spectral_density_distance = integrate.trapezoid(y = np.abs(spectral_density1 - spectral_density2), x = frequencies1)
-        alpha = np.abs(integrate.trapezoid(y = spectral_density1, x = frequencies1))
-        
+        # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
+        pdf_distance = integrate.trapezoid(np.abs(kde1_values - kde2_values), grid)
+        spectral_density_distance = integrate.trapezoid(y = np.abs(spectral_density1 - spectral_density2), x = freqs)
+        alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
+        print(alpha*pdf_distance)
+        print(spectral_density_distance)
+
         return spectral_density_distance + alpha*pdf_distance
-    
+
 
 
 class PEN(nn.Module):
