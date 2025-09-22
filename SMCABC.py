@@ -1,11 +1,8 @@
 import numpy as np
-from scipy import stats
-from scipy.special import logsumexp
+from scipy.stats import multivariate_normal, rv_continuous, rv_discrete
 import tqdm  # for progress bars
 import concurrent.futures
-
 import simulators
-import distances
 
 # ---- Globals (fixed once for all workers) ----
 X0 = None
@@ -55,7 +52,7 @@ def initial_ABC_worker(indexes, distance_threshold):
 
 def SMCABC_worker(indexes, distance_threshold, kernel_covariance, random_particle_selector, particles):
     dim = particles.shape[1]
-    proposal_kernel = stats.multivariate_normal(mean=np.zeros(dim), cov=kernel_covariance)
+    proposal_kernel = multivariate_normal(mean=np.zeros(dim), cov=kernel_covariance)
     results = []
     for i in indexes:
         distance = np.inf
@@ -78,8 +75,8 @@ def sample_posterior(
     data: np.array,
     timestep: float,
     threshold_percentile: float,
-    prior: stats.rv_continuous,
-    model_simulator: callable = simulators.FHN_model,
+    prior: rv_continuous,
+    model_simulator: callable,
     distance_calculator: type = callable,
     num_samples: int = 100,
     simulation_budget: int = 10000,
@@ -149,9 +146,9 @@ def sample_posterior(
             cov /= (1 - np.sum(weights ** 2))
             cov = 0.5 * (cov + cov.T)
             sigma = 2 * cov
-            zero_mean_kernel = stats.multivariate_normal(mean=np.zeros(particles.shape[1]), cov=sigma)
+            zero_mean_kernel = multivariate_normal(mean=np.zeros(particles.shape[1]), cov=sigma)
 
-            ancestor_selector = stats.rv_discrete(values=(np.arange(0, N), weights))
+            ancestor_selector = rv_discrete(values=(np.arange(0, N), weights))
             futures = [
                 executor.submit(
                     SMCABC_worker,

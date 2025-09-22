@@ -66,16 +66,50 @@ def main():
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
         prior=MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6),
-        data = data, timestep=0.08, distance_calculator = dist_calc, num_samples=500, simulation_budget=100000)
+        data = data, timestep=0.08, distance_calculator = dist_calc, num_samples=1000, simulation_budget=1000000,
+        model_simulator = simulators.FHN_model
+        )
     print(samples)
     print(np.mean(samples, axis=0))
-    plt.hist(samples[:,0], bins=30)
-    plt.show()
-    plt.hist(samples[:,1], bins=30)
-    plt.show()
-    plt.hist(samples[:,2], bins=30)
-    plt.show()
-    plt.hist(samples[:,3], bins=30)
+
+
+
+    # Overlay prior vs posterior per dimension with scroll navigation
+    prior_for_plot = MultivariateUniform([(0.01, 0.5), (0.01, 6), (0.01, 1)], 6)
+    prior_samples = prior_for_plot.rvs(size=20000)
+
+    dims = samples.shape[1]
+    fig, ax = plt.subplots()
+    current_dim = [0]
+
+    def plot_dim(d):
+        ax.clear()
+        # Shared range for fair overlay
+        x_min = float(min(np.min(samples[:, d]), np.min(prior_samples[:, d])))
+        x_max = float(max(np.max(samples[:, d]), np.max(prior_samples[:, d])))
+        pad = 0.05 * (x_max - x_min + 1e-12)
+        x_min -= pad
+        x_max += pad
+        bins = 30
+        ax.hist(prior_samples[:, d], bins=bins, range=(x_min, x_max), density=True,
+                histtype='step', linewidth=2, label='Prior')
+        ax.hist(samples[:, d], bins=bins, range=(x_min, x_max), weights=weights,
+                density=True, alpha=0.4, label='Posterior')
+        ax.set_title(f'Dimension {d} - use mouse wheel to scroll')
+        ax.set_xlabel('Value')
+        ax.set_ylabel('Density')
+        ax.legend()
+        fig.canvas.draw_idle()
+
+    def on_scroll(event):
+        if event.button == 'up':
+            current_dim[0] = (current_dim[0] + 1) % dims
+        elif event.button == 'down':
+            current_dim[0] = (current_dim[0] - 1) % dims
+        plot_dim(current_dim[0])
+
+    fig.canvas.mpl_connect('scroll_event', on_scroll)
+    plot_dim(current_dim[0])
     plt.show()
 
 if __name__ == "__main__":
