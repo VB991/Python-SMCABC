@@ -129,7 +129,7 @@ def sample_posterior(
         round_idx += 1
         distances_list = []
         futures = [executor.submit(initial_ABC_worker, b, distance_threshold) for b in batches]
-        for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="ABC round 1"):
+        for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round 1: δ={distance_threshold:.3f}"):
             for parameter, local_nsim, distance, idx in future.result():
                 Nsim += local_nsim
                 distances_list.append(distance)
@@ -165,7 +165,7 @@ def sample_posterior(
             ]
 
             for future in tqdm.tqdm(
-                concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round {round_idx}"
+                concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round {round_idx}: δ={distance_threshold:.3f} "
             ):
                 for new_particle, local_nsim, distance, idx in future.result():
                     Nsim += local_nsim

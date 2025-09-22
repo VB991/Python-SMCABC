@@ -77,19 +77,20 @@ class CalculateModelBasedDistance(CalculateDistance):
         kde1_values = kde1.evaluate(grid)
         kde2_values = kde2.evaluate(grid)
 
-        plt.plot(grid, kde1_values)
-        plt.plot(grid, kde2_values)
-        plt.show()
-        plt.plot(frequencies1,spectral_density1)
-        plt.plot(frequencies2,spectral_density2)
-        plt.show()
-
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
         pdf_distance = integrate.trapezoid(np.abs(kde1_values - kde2_values), grid)
         spectral_density_distance = integrate.trapezoid(y = np.abs(spectral_density1 - spectral_density2), x = freqs)
         alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
-        print(alpha*pdf_distance)
-        print(spectral_density_distance)
+
+        # For use in testing
+        # plt.plot(grid, kde1_values)
+        # plt.plot(grid, kde2_values)
+        # plt.show()
+        # plt.plot(frequencies1,spectral_density1)
+        # plt.plot(frequencies2,spectral_density2)
+        # plt.show()
+        # print(alpha*pdf_distance)
+        # print(spectral_density_distance)
 
         return spectral_density_distance + alpha*pdf_distance
 
