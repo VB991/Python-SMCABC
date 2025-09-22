@@ -61,7 +61,7 @@ def main():
     data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.08, number_of_samples = 625)
     plt.plot(data)
     plt.show() 
-    dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
+    dist_calc = distances.CalculateModelBasedDistance(data, 0.08, span=5)
 
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,

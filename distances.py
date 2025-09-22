@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from scipy import stats, signal, integrate
-import concurrent.futures
-import tqdm
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -30,18 +28,38 @@ class CalculateDistance(ABC):
 
 
 class CalculateModelBasedDistance(CalculateDistance):
-    """Calculate trajectory distance using estimated density and spectral density as summaries."""
-    def _summarise(self, trajectory):
-        # Spectral density
-        frequencies, spectral_density = signal.periodogram(trajectory, 1/self.timestep)
-        kernel = np.ones()
-        
+    def __init__(self, real_trajectory, timestep, span:int = 51):
+        """Calculate trajectory distance using estimated density and spectral density as summaries.
+
+        Args:
+            real_trajectory (_type_): Real data
+            timestep (_type_): Timestep of data
+            span (_type_): Span used for modified boxcar kernel when smoothing periodogram. Defaults to 51.
+        """
+        if span < 3 or span%2 == 0:
+            raise ValueError("Span of periodogram smoothing kernel must be an odd integer, at least 3")
+        self.span = span
+        super().__init__(real_trajectory, timestep)
+
+    def _summarise(self, trajectory):        
         # Estimated PDF
         kde = stats.gaussian_kde(trajectory)
         pad = 2*trajectory.std()
         kde_support_ends = (trajectory.min()-pad, trajectory.max()+pad) 
-        # Grid for support, kde object, frequencies, and spectral density at frequencies
-        return (kde_support_ends, kde, frequencies, spectral_density)
+
+        # Spectral density (similarly to R's "spectrum")
+        # Create modified boxcar kernel, remove linear trend from data
+        ker = np.ones(self.span, float)
+        ker[0] = ker[-1] = 0.5
+        ker /= (self.span-1)
+        detr_traj = signal.detrend(trajectory, type="linear")
+        # Compute periodogram and smooth with kernel (with wraparound padding)
+        frequencies, spectral_density = signal.periodogram(detr_traj, 1/self.timestep, window=("tukey", 0.2),return_onesided=True, scaling="density")
+        pad_length = int((self.span-1)/2)
+        padded_density = np.pad(spectral_density, pad_length, mode="wrap")
+        smooth_spectral_density = np.convolve(padded_density, ker, mode="valid")
+        # Endpoints for pdf support, kde object, frequencies, and spectral density at frequencies
+        return (kde_support_ends, kde, frequencies, smooth_spectral_density)
 
     def _calculate_summaries_distance(self, simulation_summary):
         ends1, kde1, frequencies1, spectral_density1 = self.summary
