@@ -99,7 +99,7 @@ def sample_posterior(
     N = num_samples  # number of particles kept at each iteration
     batch_size = 1
     Nsim = 0  # number of simulations of SDE model
-
+    pbar = tqdm.tqdm(total=simulation_budget, desc="NSim", unit="sim")  # progress bar for number of simulations
 
     particle_dimension = len(np.squeeze(np.atleast_1d(prior.rvs()))) # get the shape of the particles
     round_idx = 0  # index for ABC rounds
@@ -129,6 +129,7 @@ def sample_posterior(
         for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round 1: δ={distance_threshold:.3f}"):
             for parameter, local_nsim, distance, idx in future.result():
                 Nsim += local_nsim
+                pbar.update(local_nsim)
                 distances_list.append(distance)
                 particles[idx] = parameter
         weights = np.full(N, 1 / N)
@@ -166,6 +167,7 @@ def sample_posterior(
             ):
                 for new_particle, local_nsim, distance, idx in future.result():
                     Nsim += local_nsim
+                    pbar.update(local_nsim)
                     distances_list.append(distance)
                     new_particles[idx] = new_particle
 

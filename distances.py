@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from KDEpy.FFTKDE import FFTKDE
-from scipy import stats, signal, integrate
+from scipy import signal, integrate
 
 class CalculateDistance(ABC):
     """Abstract base class for trajectory distance calculators."""
@@ -39,18 +39,10 @@ class CalculateModelBasedDistance(CalculateDistance):
 
         super().__init__(real_trajectory, timestep)
 
-        ends, *_ = self.summary
+        ends, kde, *_ = self.summary
         self.grid = np.linspace(ends[0], ends[1], 1024)
         self.grid_spacing = self.grid[1] - self.grid[0]
-
-    def _next_nice_number(x):
-        # Next nice number to perform FFT
-        val = x
-        for num in [1152, 1280, 1344, 1536, 1792, 1920, 2048]:
-            if x<=num:
-                val = num
-                break
-        return val
+        self.pdf = kde.evaluate(self.grid)
 
     def _summarise(self, trajectory):       
         # KDE object for estimated density, support for KDE
@@ -84,21 +76,25 @@ class CalculateModelBasedDistance(CalculateDistance):
             freqs = frequencies1
 
         # Evaluate kde over same grid
-        left_diff = ends2[0] - ends1[0]
-        right_diff = ends1[1] - ends2[1] 
-
+        left_diff = ends1[0] - ends2[0]
+        right_diff = ends2[1] - ends1[1] 
+        n_left_points = 0
+        n_right_points = 0
+        extra_left_points = np.empty(0)
+        extra_right_points = np.empty(0)
         # Extend grid left
         if left_diff > 0:
-            extra_left_points = -(-left_diff // self.grid_spacing)  # round up mod division
+            n_left_points = -(-left_diff // self.grid_spacing)  # round up mod division
+            extra_left_points = np.arange(n_left_points)*self.grid_spacing + ends2[0]
         if right_diff > 0:
-            extra_right_points = -(-right_diff // self.grid_spacing)
-            
-        grid = np.linspace(lb, ub, 1000)
-        kde1_values = kde1.evaluate(grid)
-        kde2_values = kde2.evaluate(grid)
+            n_right_points = -(-right_diff // self.grid_spacing) 
+            extra_right_points = np.arange(n_right_points)*self.grid_spacing + ends1[1] + self.grid_spacing
+        grid = np.concatenate((extra_left_points, self.grid, extra_right_points))
+
+        sim_pdf = kde2.evaluate(grid)
 
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
-        pdf_distance = integrate.trapezoid(np.abs(kde1_values - kde2_values), grid)
+        pdf_distance = integrate.trapezoid(np.abs(self.pdf - sim_pdf), grid)
         spectral_density_distance = integrate.trapezoid(y = np.abs(spectral_density1 - spectral_density2), x = freqs)
         alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
 
