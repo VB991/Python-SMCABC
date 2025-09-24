@@ -31,7 +31,11 @@ def pilot_study_worker(indexes):
     results = []
     for particle in random_particles:
         traj = MODEL_SIMULATOR(X0, particle, TIMESTEP, DATA_LENGTH)
-        dist = DISTANCE_CALCULATOR.eval(traj)
+        # Catch infinite trajectories
+        if np.all(np.isfinite(traj)):
+            dist = DISTANCE_CALCULATOR.eval(traj)
+        else:
+            dist = np.inf   # set huge trajectories as inf far away
         results.append(dist)
     return results
 
@@ -44,8 +48,11 @@ def initial_ABC_worker(indexes, distance_threshold):
         while dist > distance_threshold:
             trial_parameter = PRIOR.rvs()[0]
             traj = MODEL_SIMULATOR(X0, trial_parameter, TIMESTEP, DATA_LENGTH)
-            dist = DISTANCE_CALCULATOR.eval(traj)
             local_nsim += 1
+            if np.all(np.isfinite(traj)):
+                dist = DISTANCE_CALCULATOR.eval(traj)
+            else:
+                dist = np.inf
         results.append((trial_parameter, local_nsim, dist, i))
     return results
 
@@ -55,17 +62,20 @@ def SMCABC_worker(indexes, distance_threshold, kernel_covariance, random_particl
     proposal_kernel = multivariate_normal(mean=np.zeros(dim), cov=kernel_covariance)
     results = []
     for i in indexes:
-        distance = np.inf
+        dist = np.inf
         local_nsim = 0
-        while distance > distance_threshold:
+        while dist > distance_threshold:
             ancestor = particles[random_particle_selector.rvs()]
             new_theta = ancestor + proposal_kernel.rvs()
             if PRIOR.pdf(new_theta) == 0:
                 continue
             trajectory_simulation = MODEL_SIMULATOR(X0, new_theta, TIMESTEP, DATA_LENGTH)
             local_nsim += 1
-            distance = DISTANCE_CALCULATOR.eval(trajectory_simulation)
-        results.append((new_theta, local_nsim, distance, i))
+            if np.all(np.isfinite(trajectory_simulation)):
+                dist = DISTANCE_CALCULATOR.eval(trajectory_simulation)
+            else:
+                dist = np.inf
+        results.append((new_theta, local_nsim, dist, i))
     return results
 
 
@@ -99,7 +109,7 @@ def sample_posterior(
     N = num_samples  # number of particles kept at each iteration
     batch_size = 1
     Nsim = 0  # number of simulations of SDE model
-    pbar = tqdm.tqdm(total=simulation_budget, desc="NSim", unit="sim")  # progress bar for number of simulations
+    pbar = tqdm.tqdm(total=simulation_budget, desc="NSim", unit="sim", position=0, leave=True)
 
     particle_dimension = len(np.squeeze(np.atleast_1d(prior.rvs()))) # get the shape of the particles
     round_idx = 0  # index for ABC rounds
@@ -117,7 +127,7 @@ def sample_posterior(
         # Pilot study
         batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
         futures = [executor.submit(pilot_study_worker, b) for b in batches]
-        for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Pilot study"):
+        for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Pilot study", position=1, leave=False):
             distances = future.result()
             distances_list.extend(distances)
         distance_threshold = np.percentile(distances_list, threshold_percentile * 100)
@@ -126,7 +136,7 @@ def sample_posterior(
         round_idx += 1
         distances_list = []
         futures = [executor.submit(initial_ABC_worker, b, distance_threshold) for b in batches]
-        for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round 1: δ={distance_threshold:.3f}"):
+        for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round 1: δ={distance_threshold:.3f}", position=1, leave=False):
             for parameter, local_nsim, distance, idx in future.result():
                 Nsim += local_nsim
                 pbar.update(local_nsim)
@@ -163,7 +173,7 @@ def sample_posterior(
             ]
 
             for future in tqdm.tqdm(
-                concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round {round_idx}: δ={distance_threshold:.3f} "
+                concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round {round_idx}: δ={distance_threshold:.3f} ", position=1, leave=False
             ):
                 for new_particle, local_nsim, distance, idx in future.result():
                     Nsim += local_nsim

@@ -39,10 +39,19 @@ class CalculateModelBasedDistance(CalculateDistance):
 
         super().__init__(real_trajectory, timestep)
 
-        ends, kde, *_ = self.summary
+        # Extract components of the "real" summary, but do NOT keep the KDE object
+        ends, _kde_unused, *rest = self.summary
+        frequencies, smooth_spectral_density = rest
+
+        # Build a fixed grid of the real-data support, and evaluate pdf_real
         self.grid = np.linspace(ends[0], ends[1], 1024)
-        self.grid_spacing = self.grid[1] - self.grid[0]
-        self.pdf = kde.evaluate(self.grid)
+        self.grid_spacing = float(self.grid[1] - self.grid[0])
+        kde_real = FFTKDE(kernel="gaussian", bw="silverman")
+        kde_real.fit(real_trajectory)
+        self.pdf = kde_real.evaluate(self.grid)
+
+        # Omit unpicklable kde object (for multiprocessing)
+        self.summary = (ends, None, frequencies, smooth_spectral_density)
 
     def _summarise(self, trajectory):       
         # KDE object for estimated density, support for KDE
@@ -67,7 +76,7 @@ class CalculateModelBasedDistance(CalculateDistance):
         return (kde_support_ends, kde, frequencies, smooth_spectral_density)
 
     def _calculate_summaries_distance(self, simulation_summary):
-        ends1, kde1, frequencies1, spectral_density1 = self.summary
+        ends1, _, frequencies1, spectral_density1 = self.summary
         ends2, kde2, frequencies2, spectral_density2 = simulation_summary
 
         if not np.allclose(frequencies1, frequencies2):
@@ -75,30 +84,30 @@ class CalculateModelBasedDistance(CalculateDistance):
         else:
             freqs = frequencies1
 
-        # Evaluate kde over same grid
-        left_diff = ends1[0] - ends2[0]
-        right_diff = ends2[1] - ends1[1] 
-        n_left_points = 0
-        n_right_points = 0
-        extra_left_points = np.empty(0)
-        extra_right_points = np.empty(0)
-        # Extend grid left
-        if left_diff > 0:
-            n_left_points = -(-left_diff // self.grid_spacing)  # round up mod division
-            extra_left_points = np.arange(n_left_points)*self.grid_spacing + ends2[0]
-        if right_diff > 0:
-            n_right_points = -(-right_diff // self.grid_spacing) 
-            extra_right_points = np.arange(n_right_points)*self.grid_spacing + ends1[1] + self.grid_spacing
-        grid = np.concatenate((extra_left_points, self.grid, extra_right_points))
+        # Evaluate KDEs over a common grid. Build a single uniform grid that
+        # extends the real-data grid by integer steps on each side to cover the
+        # simulated support. This guarantees constant spacing required by KDEpy.
+        left_diff = float(ends1[0] - ends2[0])
+        right_diff = float(ends2[1] - ends1[1])
+
+        n_left_points = int(np.ceil(max(0.0, left_diff) / self.grid_spacing))
+        n_right_points = int(np.ceil(max(0.0, right_diff) / self.grid_spacing))
+
+        new_start = self.grid[0] - n_left_points * self.grid_spacing
+        total_len = n_left_points + self.grid.size + n_right_points
+        grid = new_start + self.grid_spacing * np.arange(total_len, dtype=float)
 
         sim_pdf = kde2.evaluate(grid)
+        # Pad real PDF with zeros to match grid length
+        real_pdf = np.concatenate((
+            np.zeros(n_left_points, dtype=float),
+            self.pdf,
+            np.zeros(n_right_points, dtype=float),
+        ))
 
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
-        pdf_distance = integrate.trapezoid(np.abs(self.pdf - sim_pdf), grid)
+        pdf_distance = integrate.trapezoid(np.abs(real_pdf - sim_pdf), grid)
         spectral_density_distance = integrate.trapezoid(y = np.abs(spectral_density1 - spectral_density2), x = freqs)
         alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
 
         return spectral_density_distance + alpha*pdf_distance
-
-
-

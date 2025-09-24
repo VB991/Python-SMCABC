@@ -66,7 +66,7 @@ def main():
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
         prior=MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6),
-        data = data, timestep=0.08, distance_calculator = dist_calc, num_samples=1000, simulation_budget=1000000,
+        data = data, timestep=0.08, distance_calculator = dist_calc, num_samples=1000, simulation_budget=100000,
         model_simulator = simulators.FHN_model
         )
     print(samples)
