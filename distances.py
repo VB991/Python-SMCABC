@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import numpy as np
+from KDEpy.FFTKDE import FFTKDE
 from scipy import stats, signal, integrate
 
 class CalculateDistance(ABC):
@@ -31,16 +32,32 @@ class CalculateModelBasedDistance(CalculateDistance):
             timestep (_type_): Timestep of data
             span (_type_): Span used for modified boxcar kernel when smoothing periodogram. Defaults to 51.
         """
+        # Validate span for periodogram smoothing kernel
         if span < 3 or span%2 == 0:
             raise ValueError("Span of periodogram smoothing kernel must be an odd integer, at least 3")
         self.span = span
+
         super().__init__(real_trajectory, timestep)
 
-    def _summarise(self, trajectory):        
-        # Estimated PDF
-        kde = stats.gaussian_kde(trajectory)
-        pad = 2*trajectory.std()
-        kde_support_ends = (trajectory.min()-pad, trajectory.max()+pad) 
+        ends, *_ = self.summary
+        self.grid = np.linspace(ends[0], ends[1], 1024)
+        self.grid_spacing = self.grid[1] - self.grid[0]
+
+    def _next_nice_number(x):
+        # Next nice number to perform FFT
+        val = x
+        for num in [1152, 1280, 1344, 1536, 1792, 1920, 2048]:
+            if x<=num:
+                val = num
+                break
+        return val
+
+    def _summarise(self, trajectory):       
+        # KDE object for estimated density, support for KDE
+        kde = FFTKDE(kernel="gaussian", bw="silverman")
+        kde.fit(trajectory)
+        padding = 2*trajectory.std()    # ensure bulk of pdf is contained
+        kde_support_ends = (trajectory.min()-padding, trajectory.max()+padding) 
 
         # Spectral density (similarly to R's "spectrum")
         # Create modified boxcar kernel, remove linear trend from data
@@ -53,6 +70,7 @@ class CalculateModelBasedDistance(CalculateDistance):
         pad_length = int((self.span-1)/2)
         padded_density = np.pad(spectral_density, pad_length, mode="wrap")
         smooth_spectral_density = np.convolve(padded_density, ker, mode="valid")
+
         # Endpoints for pdf support, kde object, frequencies, and spectral density at frequencies
         return (kde_support_ends, kde, frequencies, smooth_spectral_density)
 
@@ -66,8 +84,15 @@ class CalculateModelBasedDistance(CalculateDistance):
             freqs = frequencies1
 
         # Evaluate kde over same grid
-        lb = min(ends1[0], ends2[0])
-        ub = max(ends1[1], ends2[1])   
+        left_diff = ends2[0] - ends1[0]
+        right_diff = ends1[1] - ends2[1] 
+
+        # Extend grid left
+        if left_diff > 0:
+            extra_left_points = -(-left_diff // self.grid_spacing)  # round up mod division
+        if right_diff > 0:
+            extra_right_points = -(-right_diff // self.grid_spacing)
+            
         grid = np.linspace(lb, ub, 1000)
         kde1_values = kde1.evaluate(grid)
         kde2_values = kde2.evaluate(grid)
