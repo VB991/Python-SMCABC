@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from KDEpy.FFTKDE import FFTKDE
-from scipy import signal, integrate
+from scipy import signal, integrate, fft
 
 class CalculateDistance(ABC):
     """Abstract base class for trajectory distance calculators."""
@@ -61,16 +61,24 @@ class CalculateModelBasedDistance(CalculateDistance):
         kde_support_ends = (trajectory.min()-padding, trajectory.max()+padding) 
 
         # Spectral density (similarly to R's "spectrum")
-        # Create modified boxcar kernel, remove linear trend from data
+        # Create modified boxcar kernel
         ker = np.ones(self.span, float)
         ker[0] = ker[-1] = 0.5
         ker /= (self.span-1)
-        detr_traj = signal.detrend(trajectory, type="linear")
         # Compute periodogram and smooth with kernel (with wraparound padding)
-        frequencies, spectral_density = signal.periodogram(detr_traj, 1/self.timestep, window=("tukey", 0.2),return_onesided=True, scaling="density")
+        frequencies, spectral_density = signal.periodogram(
+            x = trajectory,
+            nfft = fft.next_fast_len(len(trajectory)),
+            fs = 1/self.timestep,
+            window = ("tukey", 0.2),
+            return_onesided=True, 
+            detrend = "linear",
+            scaling="density"
+            )
+        # Pad with wraparound padding to allow convolution at endpoints
         pad_length = int((self.span-1)/2)
         padded_density = np.pad(spectral_density, pad_length, mode="wrap")
-        smooth_spectral_density = np.convolve(padded_density, ker, mode="valid")
+        smooth_spectral_density = signal.fftconvolve(padded_density, ker, mode="valid")
 
         # Endpoints for pdf support, kde object, frequencies, and spectral density at frequencies
         return (kde_support_ends, kde, frequencies, smooth_spectral_density)
