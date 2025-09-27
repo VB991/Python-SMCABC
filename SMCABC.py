@@ -83,6 +83,7 @@ def SMCABC_worker(indexes, distance_threshold, kernel_covariance, random_particl
 
 def sample_posterior(
     data: np.array,
+    initial_value: np.array,
     timestep: float,
     threshold_percentile: float,
     prior: rv_continuous,
@@ -95,6 +96,7 @@ def sample_posterior(
 
     Args:
         data (np.array): Real data time-series
+        initial_value (np.array): Initial value of data (all, including non-observed components)
         timestep (float): Time distance between consecutive samples in data
         threshold_percentile (float): Percentile (0,1) for updating distance threshold
         prior (stats.rv_continuous): Prior distribution for parameter
@@ -113,7 +115,6 @@ def sample_posterior(
 
     particle_dimension = len(np.squeeze(np.atleast_1d(prior.rvs()))) # get the shape of the particles
     round_idx = 0  # index for ABC rounds
-    initial_value = data[0]
     distance_threshold = None  # distance tolerance
     particles = np.empty((N, particle_dimension))
     weights = np.empty(N)
