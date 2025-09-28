@@ -32,26 +32,33 @@ class CalculateModelBasedDistance(CalculateDistance):
         Args:
             real_trajectory (_type_): Real data
             timestep (_type_): Timestep of data
-            span (_type_): Span used for modified boxcar kernel when smoothing periodogram. Defaults to 51.
+            span (_type_): Span used for modified boxcar kernel when smoothing periodogram.
         """
 
-        # Intialise spans for periodogram smoothing kernel
+        # Intialise kernel for smoothing periodogram
         if spans is None:
             n = round(len(real_trajectory)*timestep*0.3)
             n = n if n%2==1 else n+1
-            spans = [n,n]
+            m = int(max( (n-1)/4 + 1, 3 ))
+            spans = [n,m]
         else:
             for span in spans:
                 if span < 3 or span%2 == 0:
                     raise ValueError("Spans of periodogram smoothing kernels must be an odd integer, at least 3")
-        self.spans = spans
+        ker = np.array([1.0])
+        for span in spans:
+            box = np.ones(span, float)
+            box[0] = box[-1] = 0.50
+            box /= (span-1)
+            ker = np.convolve(box, ker, mode="full")
+        ker /= np.sum(ker)
+        self.smooth_ker = ker
 
+        # Bandwidth for kde
         self._bw = None
-        super().__init__(real_trajectory, timestep)
 
-        # Extract components of the "real" summary, but do NOT keep the KDE object
-        ends, _kde_unused, *rest = self.summary
-        frequencies, smooth_spectral_density = rest
+        super().__init__(real_trajectory, timestep)
+        ends, _, frequencies, smooth_spectral_density = self.summary
 
         # Build a fixed grid of the real-data support, and evaluate pdf_real
         self.grid = np.linspace(ends[0], ends[1], 1024)
@@ -59,50 +66,41 @@ class CalculateModelBasedDistance(CalculateDistance):
         kde_real = FFTKDE(kernel="gaussian", bw="silverman")
         kde_real.fit(real_trajectory)
         self.pdf = kde_real.evaluate(self.grid)
+
         self._bw = kde_real.bw
 
         # Omit unpicklable kde object (to allow for multiprocessing)
         self.summary = (ends, None, frequencies, smooth_spectral_density)
 
-    def _spectrum(self, trajectory):
-        trajectory = signal.detrend(trajectory, type="linear")
-        FT = np.fft.rfft(trajectory)
-        raw_spec = (np.abs(FT)**2) / (2 * trajectory.size * np.pi)
+    def _spectrum(self, trajectory, timestep):
+        # ----- Smoothed periodogram ------
+        fs = 1.0 / timestep
+        window = signal.windows.tukey(M=trajectory.size, alpha=0.1)
+        frequencies, spectral_density = signal.periodogram(
+            trajectory,
+            fs=fs,
+            window=window,
+            detrend="constant",
+            return_onesided=True,
+            scaling="density",
+        )
 
-        #TODO finish this shit
-        # Apply modified boxcar kernels (ends half the weight)
-        ker = np.array([1.0])
-        for span in self.spans:
-            box = np.ones(span, float)
-            box[0] = box[-1] = 0.50
-            box /= (span-1)
-            ker = np.convolve(box, ker, mode="full")
-        ker /= np.sum(ker)
+        # Smooth with modified boxcar kernels (ends half the weight)
+        spectral_density = signal.fftconvolve(spectral_density, self.smooth_ker, mode="same")
 
-        spectral_density = signal.fftconvolve(spectral_density, ker, mode = "same")
+        return frequencies, spectral_density
 
     def _summarise(self, trajectory):
+        # ------ Calculate summary of trajectory --------
 
-        # ------ Estimated density --------
         # KDE object for estimated density, support for KDE
         kde = FFTKDE(kernel="gaussian", bw="silverman" if self._bw is None else self._bw)
         kde.fit(trajectory)
         padding = 2*trajectory.std()    # ensure bulk of pdf is contained
         kde_support_ends = (trajectory.min()-padding, trajectory.max()+padding) 
 
-        # ------- Smoothed Periodogram --------
-
-        frequencies, spectral_density = signal.periodogram(
-            x = trajectory,
-            nfft = fft.next_fast_len(len(trajectory)),
-            fs = 1/self.timestep,
-            window = ("tukey", 0.2),
-            return_onesided=True, 
-            detrend = "linear",
-            scaling="density"
-            )
-
-
+        # Smoothed periodogram
+        frequencies, spectral_density = self._spectrum(trajectory, self.timestep)
 
         # ------ Return: Endpoints for pdf support, kde object, frequencies, and spectral density at frequencies ------
         return (kde_support_ends, kde, frequencies, spectral_density)
@@ -138,12 +136,12 @@ class CalculateModelBasedDistance(CalculateDistance):
         ))
         
         # FOR TESTING PURPOSES
-        # plt.plot(grid, sim_pdf, linestyle="dotted")
-        # plt.plot(grid, real_pdf)
-        # plt.show()
-        # plt.plot(freqs, spectral_density2, linestyle="dotted")
-        # plt.plot(freqs, spectral_density1)
-        # plt.show()
+        plt.plot(grid, sim_pdf, linestyle="dotted")
+        plt.plot(grid, real_pdf)
+        plt.show()
+        plt.plot(freqs, spectral_density2, linestyle="dotted")
+        plt.plot(freqs, spectral_density1)
+        plt.show()
 
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
         pdf_distance = integrate.trapezoid(np.abs(real_pdf - sim_pdf), grid)
