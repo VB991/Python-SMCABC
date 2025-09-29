@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from KDEpy.FFTKDE import FFTKDE
 from scipy import signal, integrate, fft
 
@@ -143,3 +144,232 @@ class CalculateModelBasedDistance(CalculateDistance):
         alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
 
         return spectral_density_distance + alpha*pdf_distance
+
+
+class CalculatePENDistance(CalculateDistance):
+    def __init__(
+        self
+    ):
+        self.layers = None  # Dictionary containing PEN weights and biases
+        self.k = None       # Markov order
+
+    # ----- Alternative Constructor -----
+    def create_and_train_PEN(
+            self, 
+            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep,
+            batch_size, 
+            num_epochs, 
+            markov_order = 1, 
+            device_name = "cpu"
+            ):
+        
+        # Lazy imports to prevent torch dependency in instances of this class
+        import torch
+        import torch.nn as nn
+        from torch.utils.data import DataLoader, TensorDataset
+
+
+        #  ------ Define internal PEN pytorch neural network: only used for construction and training ------
+        class PEN(nn.Module):
+            '''Partially Exchangeable Network for learning summary statistics for Markov process'''
+            def __init__(self, parameter_dim, markov_order=1):
+                super().__init__()
+                self.k = markov_order
+
+                # Layers for PEN inner function
+                self.encoder_in = nn.Linear(self.k+1, 100)
+                self.encoder_hidden = nn.Linear(100,50)
+                self.encoder_out = nn.Linear(50,10)
+
+                # Layers for PEN outer function
+                self.head_in = nn.Linear(10+self.k, 100)
+                self.head_hidden1 = nn.Linear(100, 100)
+                self.head_hidden2 = nn.Linear(100, 50)
+                self.head_out = nn.Linear(50, parameter_dim)
+
+            def _apply_encoder(self, x):
+                '''Apply representation layer to input time series'''
+                # Convert unbatched input to a batch of size 1.
+                if x.dim() == 1:
+                    x = x.unsqueeze(0)
+                elif x.dim() != 2:
+                    raise ValueError("Expected batched or unbatched 1D input")
+
+                # Ensure sufficiently sized input
+                if x.size(1) < self.k + 1:
+                    raise ValueError(
+                        f"Input length ({x.size(1)}) must be at least markov_order+1 ({self.k + 1})."
+                    )
+                
+                # Create the subsequence blocks for encoding
+                blocks = x.unfold(dimension=1, size=self.k + 1, step=1)
+                batch_size, num_blocks, _ = blocks.shape
+                # Flatten windows to (batch_size * num_blocks, k+1) for the encoder
+                blocks = blocks.reshape(-1, self.k + 1)
+
+                # Encode each block and reshape back to (batch_size, num_blocks, encoded_dim)
+                encoded_blocks = nn.functional.relu(self.encoder_in(blocks))
+                encoded_blocks = nn.functional.relu(self.encoder_hidden(encoded_blocks))
+                encoded_blocks = nn.functional.relu(self.encoder_out(encoded_blocks))
+                encoded_blocks = encoded_blocks.reshape(batch_size, num_blocks, encoded_blocks.size(-1))
+
+                # Sum the representations across the timestamp axis
+                aggregated = encoded_blocks.sum(dim=1)
+
+                # Append the summed representations to the first k raw values
+                first_k = x[:, :self.k].to(aggregated.dtype)  # Ensure same dtype of entries of x and representations
+
+                return torch.cat([first_k, aggregated], dim=1)
+
+            def forward(self, x):
+                x = self._apply_encoder(x)
+                x = nn.functional.relu(self.head_in(x))
+                x = nn.functional.relu(self.head_hidden1(x))
+                x = nn.functional.relu(self.head_hidden2(x))
+                x = self.head_out(x)
+                return x
+
+
+        # ----- PEN -------
+
+        # Create training data from simulator
+        print("Creating PEN:")
+        print("Simulating training trajectories...")
+        training_trajs = []
+        for theta in training_thetas:
+            training_trajs.append(model_simulator(traj_initial_value, theta, timestep, real_trajectory.size))
+        training_trajs = np.array(training_trajs)
+        print("... finished!")
+        
+        #  Ensure correct type for training data
+        training_trajs = np.asarray(training_trajs, dtype=np.float32)
+        training_thetas = np.asarray(training_thetas, dtype=np.float32)
+
+        # Validate shapes for training data
+        if training_trajs.ndim != 2:
+            raise ValueError("training_data_x must be a 2D array of shape (num_samples, sequence_length)")
+        if training_thetas.ndim != 2:
+            raise ValueError("training_data_params must be a 2D array of shape (num_samples, parameter_dim)")
+        if training_trajs.shape[0] != training_thetas.shape[0]:
+            raise ValueError("training_data_x and training_data_params must have the same number of samples")
+
+        # Create instance of PEN (torch neural network)
+        summaryNN = PEN(parameter_dim = training_thetas[0].size, markov_order=markov_order)
+
+        # Validate user-input training device
+        allowed = {"cpu", "cuda"}
+        if device_name is None:
+            print("No device specified: training device set to CPU")
+            device_name = "cpu"
+        elif device_name not in allowed:
+            raise ValueError(f"Invalid device '{device_name}'. Must be one of {allowed}.")
+
+
+        # Move summaryNN to training device
+        if device_name == "cpu":
+            print("Training device set to CPU")
+            device = torch.device("cpu")
+        elif device_name == "cuda" and torch.cuda.is_available():
+            print("Training device set to GPU")
+            device = torch.device("cuda") 
+        else:
+            print("GPU not available: training device set to CPU")
+            device = torch.device("cpu")
+        summaryNN.to(device)
+ 
+        # Prepare data-loader for training
+        dataset = TensorDataset(
+            torch.from_numpy(training_trajs),
+            torch.from_numpy(training_thetas),
+        )
+        loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=True)
+        
+        # Define cost function
+        def mean_euclidean_squared(pred, target):
+            sample_loss = (pred - target).pow(2).sum(dim=1)
+            return sample_loss.mean()
+        
+        # Specify optimiser for training
+        optimizer = torch.optim.Adam(summaryNN.parameters(), lr=1e-3)
+
+        # Enter training
+        print("Beginning training loop...")
+        summaryNN.train()
+        for _ in range(num_epochs):
+            for batch_x, batch_y in loader:
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+
+                preds = summaryNN(batch_x)
+                loss = mean_euclidean_squared(preds, batch_y)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+        summaryNN.eval()
+        print("... finished!")
+        # Exit training
+
+        # ----- Export to lightweight numpy version -----
+
+        def grab(layer):
+            W = layer.weight.detach().cpu().numpy().astype(np.float32)
+            b = layer.bias.detach().cpu().numpy().astype(np.float32)
+            return W, b
+        
+        layers = {
+            "encoder_in":     grab(summaryNN.encoder_in),
+            "encoder_hidden": grab(summaryNN.encoder_hidden),
+            "encoder_out":    grab(summaryNN.encoder_out),
+            "head_in":        grab(summaryNN.head_in),
+            "head_hidden1":   grab(summaryNN.head_hidden1),
+            "head_hidden2":   grab(summaryNN.head_hidden2),
+            "head_out":       grab(summaryNN.head_out),
+        }
+
+        self.layers = layers
+        self.k = markov_order
+
+        # ------ Call base constructor now that we can summarise ------
+        super().__init__(real_trajectory, timestep)
+
+
+    # ------ Execute and return feed foward ------
+    def _summarise(self, trajectory):
+        # ----- Helpers for feeding forward -----
+        def linear(z, W, b):
+            return z@W.T + b
+        def ReLU(z):
+            return np.maximum(z, 0.0)
+
+        trajectory = np.asarray(trajectory, dtype=np.float32)
+
+        if self.k is None:
+            raise RuntimeError("PEN not initialised. Call create_and_train_PEN first.")
+        if trajectory.size < self.k + 1:
+            raise ValueError(f"Input length ({trajectory.size}) must be at least markov_order+1 ({self.k + 1}).")
+
+        # Create contiguous blocks for encoder
+        blocks = sliding_window_view(trajectory, window_shape = self.k+1)
+
+        # Extract weights and biases 
+        W, b = self.layers["encoder_in"]
+        blocks = ReLU(linear(blocks, W, b))
+        W, b = self.layers["encoder_hidden"]
+        blocks = ReLU(linear(blocks, W, b))
+        W, b = self.layers["encoder_out"]
+        blocks = ReLU(linear(blocks, W, b))
+
+        encoding = blocks.sum(axis=0)
+        first_k = trajectory[:self.k]
+        x = np.concatenate([first_k, encoding], axis=0)
+
+        W, b = self.layers["head_in"];       x = ReLU(linear(x, W, b)); 
+        W, b = self.layers["head_hidden1"];  x = ReLU(linear(x, W, b)); 
+        W, b = self.layers["head_hidden2"];  x = ReLU(linear(x, W, b)); 
+        W, b = self.layers["head_out"];      x = linear(x, W, b); 
+
+        return x
+
+    def _calculate_summaries_distance(self, simulation_summary):
+        return np.linalg.norm(self.summary-simulation_summary)

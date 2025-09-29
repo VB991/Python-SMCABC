@@ -15,7 +15,7 @@ import numpy as np
 from scipy import stats
 
 import simulators
-import distances_PEN
+from distances import CalculatePENDistance
 from main import MultivariateUniform
 
 
@@ -45,7 +45,7 @@ def evaluate_pen_summary(
     timestep=0.08,
     number_of_samples=625,
     initial_value=None,
-    num_training_samples=10000,
+    num_training_samples=1000,
     num_training_epochs=15,
     markov_order=1,
     training_batch_size=64,
@@ -80,16 +80,22 @@ def evaluate_pen_summary(
         rng=training_rng,
     )
 
-    pen_distance = distances_PEN.CalculatePENDistance(
+    pen_distance = CalculatePENDistance()
+    pen_distance.create_and_train_PEN(
+        model_simulator=lambda traj_init, theta, dt, n: simulators.FHN_model(
+            initial_value=traj_init,
+            theta=theta,
+            timestep=dt,
+            number_of_samples=n,
+        ),
+        training_thetas=training_theta,
+        traj_initial_value=initial_value,
         real_trajectory=reference_traj,
         timestep=timestep,
-        parameter_dim=true_theta.shape[0],
-        training_data_x=training_x,
-        training_data_params=training_theta,
-        markov_order=markov_order,
         batch_size=training_batch_size,
         num_epochs=num_training_epochs,
-        device=device,
+        markov_order=markov_order,
+        device_name=device,
     )
 
     eval_seed = int(rng.integers(0, np.iinfo(np.int32).max))

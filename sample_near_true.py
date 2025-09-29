@@ -2,7 +2,7 @@ import numpy as np
 
 import simulators
 import distances
-import distances_PEN
+from distances import CalculatePENDistance
 from tqdm import tqdm
 from main import MultivariateUniform
 
@@ -46,7 +46,24 @@ def main():
     for theta in thetas:
         train_data.append(simulators.FHN_model(np.zeros(2), theta, timestep=d, number_of_samples=n))
     train_data = np.array(train_data)
-    dist_calc = distances_PEN.CalculatePENDistance(real_trajectory=data, parameter_dim=4, timestep=d, training_data_x=train_data, training_data_params=thetas, device="cuda")
+    pen = CalculatePENDistance()
+    pen.create_and_train_PEN(
+        model_simulator=lambda traj_init, theta, dt, n: simulators.FHN_model(
+            initial_value=traj_init,
+            theta=theta,
+            timestep=dt,
+            number_of_samples=n,
+        ),
+        training_thetas=thetas,
+        traj_initial_value=np.zeros(2),
+        real_trajectory=data,
+        timestep=d,
+        batch_size=32,
+        num_epochs=15,
+        markov_order=1,
+        device_name="cuda",
+    )
+    dist_calc = pen
 
     kept = []
     kept_dists = []
