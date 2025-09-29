@@ -47,7 +47,7 @@ def evaluate_summary(
     if initial_value is None:
         initial_value = np.zeros(2, dtype=float)
 
-    reference_traj = _simulate(true_theta, initial_value, timestep, number_of_samples)
+    reference_traj = np.loadtxt("observation.txt")[0:int(number_of_samples*timestep/0.0001):int(timestep/0.0001)]
     distance_calculator = distances.CalculateModelBasedDistance(
         real_trajectory=reference_traj,
         timestep=timestep,
@@ -56,28 +56,54 @@ def evaluate_summary(
     prior = MultivariateUniform([(0.01, 0.5), (0.01, 6.0), (0.01, 1.0)], second_upper=6.0)
 
     prior_draw_seed = int(rng.integers(0, np.iinfo(np.int32).max))
-    prior_draws = prior.rvs(size=num_prior_draws, random_state=prior_draw_seed)
-    prior_draws = np.atleast_2d(prior_draws)
+    prior_draws = np.atleast_2d(prior.rvs(size=num_prior_draws, random_state=prior_draw_seed))
 
-    distances_to_reference = np.empty(num_prior_draws, dtype=float)
-    parameter_errors = np.empty(num_prior_draws, dtype=float)
+    # Collect only finite simulations to avoid KDE failures
+    distances_list = []
+    param_error_list = []
 
-    for idx, theta in enumerate(prior_draws):
+    for theta in prior_draws:
         trajectory = _simulate(theta, initial_value, timestep, number_of_samples)
-        distances_to_reference[idx] = distance_calculator.eval(trajectory)
-        parameter_errors[idx] = np.linalg.norm(theta - true_theta)
+        if np.all(np.isfinite(trajectory)):
+            try:
+                d = distance_calculator.eval(trajectory)
+            except Exception:
+                # In case downstream distance calc fails for any reason, skip
+                continue
+            if np.isfinite(d):
+                distances_list.append(float(d))
+                param_error_list.append(float(np.linalg.norm(theta - true_theta)))
 
-    pearson_r, pearson_p = stats.pearsonr(parameter_errors, distances_to_reference)
-    spearman_r, spearman_p = stats.spearmanr(parameter_errors, distances_to_reference)
+    distances_to_reference = np.asarray(distances_list, dtype=float)
+    parameter_errors = np.asarray(param_error_list, dtype=float)
 
-    same_parameter_distances = np.empty(num_replicates, dtype=float)
-    for j in range(num_replicates):
+    if parameter_errors.size >= 2:
+        pearson_r, pearson_p = stats.pearsonr(parameter_errors, distances_to_reference)
+        spearman_r, spearman_p = stats.spearmanr(parameter_errors, distances_to_reference)
+    else:
+        pearson_r = spearman_r = np.nan
+        pearson_p = spearman_p = np.nan
+
+    same_parameter_distances = []
+    for _ in range(num_replicates):
         trajectory = _simulate(true_theta, initial_value, timestep, number_of_samples)
-        same_parameter_distances[j] = distance_calculator.eval(trajectory)
+        if np.all(np.isfinite(trajectory)):
+            try:
+                d = distance_calculator.eval(trajectory)
+            except Exception:
+                continue
+            if np.isfinite(d):
+                same_parameter_distances.append(float(d))
+    same_parameter_distances = np.asarray(same_parameter_distances, dtype=float)
 
-    median_error = np.median(parameter_errors)
-    close_mask = parameter_errors <= median_error
-    far_mask = ~close_mask
+    if parameter_errors.size > 0:
+        median_error = float(np.median(parameter_errors))
+        close_mask = parameter_errors <= median_error
+        far_mask = ~close_mask
+    else:
+        median_error = np.nan
+        close_mask = np.array([], dtype=bool)
+        far_mask = np.array([], dtype=bool)
 
     results = {
         "pearson_r": pearson_r,
@@ -85,10 +111,10 @@ def evaluate_summary(
         "spearman_r": spearman_r,
         "spearman_p_value": spearman_p,
         "num_draws": num_prior_draws,
-        "median_distance_close": float(np.median(distances_to_reference[close_mask])),
-        "median_distance_far": float(np.median(distances_to_reference[far_mask])),
-        "median_distance_true_replicates": float(np.median(same_parameter_distances)),
-        "true_replicate_quantiles": np.quantile(same_parameter_distances, [0.1, 0.5, 0.9]).tolist(),
+        "median_distance_close": float(np.median(distances_to_reference[close_mask])) if close_mask.size and np.any(close_mask) else np.nan,
+        "median_distance_far": float(np.median(distances_to_reference[far_mask])) if far_mask.size and np.any(far_mask) else np.nan,
+        "median_distance_true_replicates": float(np.median(same_parameter_distances)) if same_parameter_distances.size else np.nan,
+        "true_replicate_quantiles": np.quantile(same_parameter_distances, [0.1, 0.5, 0.9]).tolist() if same_parameter_distances.size else [np.nan, np.nan, np.nan],
     }
     return results
 

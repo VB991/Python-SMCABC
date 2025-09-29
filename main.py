@@ -58,11 +58,16 @@ class MultivariateUniform:
 
 
 def main():
+    n = 625
+    d = 0.08
+    T = n*d
     # observation data comes from this:
     # data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.0001, number_of_samples = 2000000)
-    data = np.loadtxt("observation.txt")
+    data = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
     plt.plot(data)
     plt.show() 
+    
+    
     dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
 
     samples, weights = SMCABC.sample_posterior( 

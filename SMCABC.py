@@ -126,7 +126,7 @@ def sample_posterior(
         initargs=(initial_value, timestep, len(data), model_simulator, distance_calculator, prior),
     ) as executor:
         # Pilot study
-        batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
+        batches = [list(range(i, min(i + batch_size, N))) for i in range(0, 10000, batch_size)]
         futures = [executor.submit(pilot_study_worker, b) for b in batches]
         for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Pilot study", position=1, leave=False):
             distances = future.result()
@@ -136,6 +136,7 @@ def sample_posterior(
         # Initial ABC round
         round_idx += 1
         distances_list = []
+        batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
         futures = [executor.submit(initial_ABC_worker, b, distance_threshold) for b in batches]
         for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"ABC round 1: δ={distance_threshold:.3f}", position=1, leave=False):
             for parameter, local_nsim, distance, idx in future.result():
@@ -153,14 +154,11 @@ def sample_posterior(
             distances_list = []
 
             # Build zero-mean kernel for this round
-            centred = particles - weights @ particles
-            cov = centred.T @ (centred * weights[:, None])
-            cov /= (1 - np.sum(weights ** 2))
-            cov = 0.5 * (cov + cov.T)
-            sigma = 2 * cov
+            sigma = 2*np.cov(particles, aweights=weights, bias=False)
             zero_mean_kernel = multivariate_normal(mean=np.zeros(particles.shape[1]), cov=sigma)
 
             ancestor_selector = rv_discrete(values=(np.arange(0, N), weights))
+            batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
             futures = [
                 executor.submit(
                     SMCABC_worker,

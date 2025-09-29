@@ -39,8 +39,7 @@ class CalculateModelBasedDistance(CalculateDistance):
         if spans is None:
             n = round(len(real_trajectory)*timestep*0.3)
             n = n if n%2==1 else n+1
-            m = int(max( (n-1)/4 + 1, 3 ))
-            spans = [n,m]
+            spans = [n]
         else:
             for span in spans:
                 if span < 3 or span%2 == 0:
@@ -54,9 +53,6 @@ class CalculateModelBasedDistance(CalculateDistance):
         ker /= np.sum(ker)
         self.smooth_ker = ker
 
-        # Bandwidth for kde
-        self._bw = None
-
         super().__init__(real_trajectory, timestep)
         ends, _, frequencies, smooth_spectral_density = self.summary
 
@@ -66,8 +62,6 @@ class CalculateModelBasedDistance(CalculateDistance):
         kde_real = FFTKDE(kernel="gaussian", bw="silverman")
         kde_real.fit(real_trajectory)
         self.pdf = kde_real.evaluate(self.grid)
-
-        self._bw = kde_real.bw
 
         # Omit unpicklable kde object (to allow for multiprocessing)
         self.summary = (ends, None, frequencies, smooth_spectral_density)
@@ -94,7 +88,7 @@ class CalculateModelBasedDistance(CalculateDistance):
         # ------ Calculate summary of trajectory --------
 
         # KDE object for estimated density, support for KDE
-        kde = FFTKDE(kernel="gaussian", bw="silverman" if self._bw is None else self._bw)
+        kde = FFTKDE(kernel="gaussian", bw="silverman")
         kde.fit(trajectory)
         padding = 2*trajectory.std()    # ensure bulk of pdf is contained
         kde_support_ends = (trajectory.min()-padding, trajectory.max()+padding) 
@@ -136,12 +130,12 @@ class CalculateModelBasedDistance(CalculateDistance):
         ))
         
         # FOR TESTING PURPOSES
-        plt.plot(grid, sim_pdf, linestyle="dotted")
-        plt.plot(grid, real_pdf)
-        plt.show()
-        plt.plot(freqs, spectral_density2, linestyle="dotted")
-        plt.plot(freqs, spectral_density1)
-        plt.show()
+        # plt.plot(grid, sim_pdf, linestyle="dotted")
+        # plt.plot(grid, real_pdf)
+        # plt.show()
+        # plt.plot(freqs, spectral_density2, linestyle="dotted")
+        # plt.plot(freqs, spectral_density1)
+        # plt.show()
 
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
         pdf_distance = integrate.trapezoid(np.abs(real_pdf - sim_pdf), grid)
