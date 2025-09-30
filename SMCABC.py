@@ -79,6 +79,18 @@ def SMCABC_worker(indexes, distance_threshold, kernel_covariance, random_particl
     return results
 
 
+def weight_update_worker(indexes, new_particles, kernel_covariance, old_particles, old_weights):
+    dim = new_particles.shape[1]
+    zero_mean_kernel = multivariate_normal(mean=np.zeros(dim), cov=kernel_covariance)
+    results = []
+    for i in indexes:
+        diffs = new_particles[i] - old_particles    # (num_samples, param_dim)
+        k_vals = zero_mean_kernel.pdf(diffs)    # (num_samples,)
+        denom = np.sum(old_weights * k_vals)
+        results.append((i, denom))
+    return results
+
+
 # ---- Main routine ----
 
 def sample_posterior(
@@ -120,12 +132,14 @@ def sample_posterior(
     weights = np.empty(N)
     distances_list = []
 
+    # Initialise worker processes
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=None,
         initializer=init_globals,
         initargs=(initial_value, timestep, len(data), model_simulator, distance_calculator, prior),
     ) as executor:
-        # Pilot study
+        
+        # ------ Pilot study -------
         batches = [list(range(i, min(i + batch_size, N))) for i in range(0, 10000, batch_size)]
         futures = [executor.submit(pilot_study_worker, b) for b in batches]
         for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Pilot study", position=1, leave=False):
@@ -133,7 +147,7 @@ def sample_posterior(
             distances_list.extend(distances)
         distance_threshold = np.percentile(distances_list, threshold_percentile * 100)
 
-        # Initial ABC round
+        # ------- Initial ABC round -------
         round_idx += 1
         distances_list = []
         batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
@@ -146,16 +160,15 @@ def sample_posterior(
                 particles[idx] = parameter
         weights = np.full(N, 1 / N)
 
-        # Subsequent rounds
+        # ------- Subsequent rounds -------
         while Nsim < simulation_budget:
             round_idx += 1
             distance_threshold = np.percentile(distances_list, threshold_percentile * 100)
             new_particles = np.empty((N, particle_dimension))
             distances_list = []
 
-            # Build zero-mean kernel for this round
-            sigma = 2*np.cov(particles, aweights=weights, bias=False)
-            zero_mean_kernel = multivariate_normal(mean=np.zeros(particles.shape[1]), cov=sigma)
+            # Build kernel covariance for this round
+            sigma = 2*np.cov(particles, rowvar=False, aweights=weights, bias=False)
 
             ancestor_selector = rv_discrete(values=(np.arange(0, N), weights))
             batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
@@ -180,12 +193,25 @@ def sample_posterior(
                     distances_list.append(distance)
                     new_particles[idx] = new_particle
 
-            # Update weights
-            # For below: (new_particle, repeat, pdim) - (repeat, old_particle, pdim)
-            diffs = np.repeat(new_particles[:,None,:], repeats=N, axis=1) - np.repeat(particles[None,:,:], repeats=N, axis=0)
-            diffs = diffs.reshape(-1, particle_dimension)   # (new_particle, index, pdim) --> (new_particle*index, pdim)
-            kernel_vals = zero_mean_kernel.pdf(diffs).reshape(N, N)  # (new_particle, index) array of kernel values
-            denominators = np.sum(weights * kernel_vals, axis = 1)
+            # Update weights using parallel workers (avoid large 3D arrays)
+            denom_batches = [list(range(i, min(i + batch_size, N))) for i in range(0, N, batch_size)]
+            denom_futures = [
+                executor.submit(
+                    weight_update_worker,
+                    b,
+                    new_particles,
+                    sigma,
+                    particles,
+                    weights,
+                )
+                for b in denom_batches
+            ]
+
+            denominators = np.empty(N)
+            for future in concurrent.futures.as_completed(denom_futures):
+                for idx, denom in future.result():
+                    denominators[idx] = denom
+
             new_weights = prior.pdf(new_particles) / denominators
 
             particles = new_particles

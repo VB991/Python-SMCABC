@@ -2,9 +2,12 @@ from abc import ABC, abstractmethod
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from KDEpy.FFTKDE import FFTKDE
-from scipy import signal, integrate, fft
+from scipy import signal, integrate
 
 import matplotlib.pyplot as plt
+
+
+
 
 class CalculateDistance(ABC):
     """Abstract base class for trajectory distance calculators."""
@@ -23,6 +26,11 @@ class CalculateDistance(ABC):
     def eval(self, simulation_trajectory):
         sim_summary = self._summarise(simulation_trajectory)
         return self._calculate_summaries_distance(sim_summary)
+
+
+
+
+
 
 
 
@@ -144,8 +152,13 @@ class CalculateModelBasedDistance(CalculateDistance):
         alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
 
         return spectral_density_distance + alpha*pdf_distance
+    
 
 
+
+
+
+    
 class CalculatePENDistance(CalculateDistance):
     def __init__(
         self
@@ -156,11 +169,11 @@ class CalculatePENDistance(CalculateDistance):
     # ----- Alternative Constructor -----
     def create_and_train_PEN(
             self, 
-            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep,
-            batch_size, 
+            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep, 
             num_epochs, 
             markov_order = 1, 
-            device_name = "cpu"
+            device_name = "cpu",
+            batch_size=32,
             ):
         
         # Lazy imports to prevent torch dependency in instances of this class
@@ -239,7 +252,7 @@ class CalculatePENDistance(CalculateDistance):
         for theta in training_thetas:
             training_trajs.append(model_simulator(traj_initial_value, theta, timestep, real_trajectory.size))
         training_trajs = np.array(training_trajs)
-        print("... finished!")
+        print("finished!")
         
         #  Ensure correct type for training data
         training_trajs = np.asarray(training_trajs, dtype=np.float32)
@@ -307,7 +320,7 @@ class CalculatePENDistance(CalculateDistance):
                 loss.backward()
                 optimizer.step()
         summaryNN.eval()
-        print("... finished!")
+        print("finished!")
         # Exit training
 
         # ----- Export to lightweight numpy version -----
@@ -336,7 +349,7 @@ class CalculatePENDistance(CalculateDistance):
 
     # ------ Execute and return feed foward ------
     def _summarise(self, trajectory):
-        # ----- Helpers for feeding forward -----
+        # Helpers for feeding forward
         def linear(z, W, b):
             return z@W.T + b
         def ReLU(z):
@@ -370,6 +383,7 @@ class CalculatePENDistance(CalculateDistance):
         W, b = self.layers["head_out"];      x = linear(x, W, b); 
 
         return x
+
 
     def _calculate_summaries_distance(self, simulation_summary):
         return np.linalg.norm(self.summary-simulation_summary)

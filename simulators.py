@@ -70,3 +70,14 @@ def FHN_model(initial_value, theta, timestep, number_of_samples):
         X[i+1, 0] = v_next
         X[i+1, 1] = u_next
     return X[:,0]  # return only the voltage time-series
+
+@njit(fastmath=True)
+def OH_model(initial_value, theta, timestep, number_of_samples):
+    ''' dX = (00 - θ1 X)dt + θ2dW'''
+    temp = theta[1]*timestep
+    mean = theta[0]/theta[1] + (initial_value - theta[0]/theta[1]) * np.exp(-temp)
+    var = theta[2]**2 * np.sqrt( (1 - np.exp(-2*temp) ) / (2*theta[1]) )
+    sd = np.sqrt(var)
+    X = np.random.normal(mean, sd, number_of_samples)
+    return X
+    
