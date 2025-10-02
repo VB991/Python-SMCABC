@@ -99,47 +99,69 @@ class UniformND:
     def support(self):
         return self.bounds
 
-def main():
-    n = 500
+def main(model, summary):
+    n = 625
     d = 0.08
     T = n*d
     # observation data comes from this:
-    # data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.0001, number_of_samples = 2000000)
-    FHNdata = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
-    OHdata = simulators.OH_model(0.0, [0.0, 1, 1], d, n)
+    # data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.0001, number_of_samples = 2000000)
+    # np.savetxt("observation.txt", data)
 
-    data = OHdata
+    if model == "FHN":
+        # data = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
+        data = np.loadtxt("data_Delta0.08.txt")[0:625]
+        print(len(data))
+        simulator = simulators.FHN_model
+        prior = MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6)
+        mkv_order = 1
+        x0 = np.zeros(2)
+        true_theta = np.array([0.1, 1.5, 0.8, 0.3])
+    elif model == "OU":
+        data = simulators.OU_model(0.0, [0.0, 1.0, np.sqrt(2)], d, n)
+        simulator = simulators.OU_model
+        prior = UniformND([(-2,2), (0.1, 10), (0.1, 10)])
+        mkv_order = 0
+        x0 = 0.0
+        true_theta = np.array([0.0, 1.0, np.sqrt(2.0)])
+    else:
+        raise ValueError("Invalid model type specified")
+
     plt.plot(data)
     plt.show()
     
-    FHNprior = MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6)
-    OHprior = UniformND([(0.1, 10), (0.1, 10)])
-   
-    model_dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
-    pen_dist_calc = distances.CalculatePENDistance()
-    # pen_dist_calc.create_and_train_PEN(
-    #     model_simulator = simulators.FHN_model,
-    #     training_thetas = FHNprior.rvs(10000),
-    #     traj_initial_value = np.zeros(2),
-    #     real_trajectory=data,
-    #     timestep = d,
-    #     num_epochs = 15,
-    #     device_name = "cuda"
-    # )
+    if summary == "MODEL":
+        dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
+    elif summary == "PEN":
+        dist_calc = distances.CalculatePENDistance()
+        dist_calc.create_and_train_PEN(
+            markov_order=mkv_order,
+            model_simulator = simulator,
+            training_thetas = prior.rvs(100000),
+            traj_initial_value = np.zeros(2),
+            real_trajectory=data,
+            timestep = d,
+            num_epochs = 50,
+            device_name = "cuda",
+            early_stopping_patience=5,
+            early_stopping_min_delta=0.1
+        )
+    else:
+        raise ValueError("Invalid summary type specified")
 
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
-        prior=OHprior,
-        data = data, timestep=0.08, distance_calculator = model_dist_calc, num_samples=1000, simulation_budget=100000, initial_value=0.0,
-        model_simulator = simulators.OH_model
+        prior=prior,
+        data = data, timestep=d, distance_calculator = dist_calc, num_samples=1000, simulation_budget=1000000,
+          initial_value=x0,
+        model_simulator = simulator
         )
-    print(samples)
-    print(np.mean(samples, axis=0))
+    print("True mean:",[0.1, 1.5, 0.8, 0.3])
+    print("Posterior:",np.average(samples, axis=0, weights=weights))
 
 
 
     # Overlay prior vs posterior per dimension with scroll navigation
-    prior_for_plot = OHprior
+    prior_for_plot = prior
     prior_samples = prior_for_plot.rvs(size=20000)
 
     dims = samples.shape[1]
@@ -162,6 +184,8 @@ def main():
         ax.set_title(f'Dimension {d} - use mouse wheel to scroll')
         ax.set_xlabel('Value')
         ax.set_ylabel('Density')
+        # Overlay true parameter value as a vertical line
+        ax.axvline(true_theta[d], color='k', linestyle='--', linewidth=2, label='True value')
         ax.legend()
         fig.canvas.draw_idle()
 
@@ -177,4 +201,4 @@ def main():
     plt.show()
 
 if __name__ == "__main__":
-    main()
+    main("FHN", "PEN")

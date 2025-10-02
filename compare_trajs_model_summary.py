@@ -3,23 +3,36 @@ import simulators
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Change here to switch model type
+model = "FHN"
 
 # Subsampling parameters as in main.py
-d = 0.02
-n = 10000
+d = 0.08
+n = 2500
+T = n*d
 
-# Load and simulate trajectories
-data = np.loadtxt("observation.txt")[0:int(n * d / 0.0001):int(d / 0.0001)]
-
-# How many simulated trajectories to compare
-num_trajs = 100  # change this to desired count
 
 # Simulate all trajectories at the real (true) theta
-true_theta = np.array([0.1, 1.5, 0.8, 0.3], dtype=float)
+FHNtrue_theta = np.array([0.1, 1.5, 0.8, 0.3], dtype=float)
+OUtrue_theta = np.array([0.0, 1.0, 1.0], dtype=float)
+true_theta = FHNtrue_theta if model == "FHN" else OUtrue_theta
+
+# Load and simulate trajectories
+FHNdata = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
+OUdata = simulators.OU_model(0.0, OUtrue_theta, d, n)
+data = FHNdata if model == "FHN" else OUdata
+
+# How many simulated trajectories to compare
+num_trajs = 5  # change this to desired count
 
 trajectories = [("data", data)]
 for i in range(num_trajs):
-    traj = simulators.FHN_model(initial_value=np.zeros(2), theta=true_theta, timestep=d, number_of_samples=n)
+    if model == "FHN":
+        traj = simulators.FHN_model(initial_value=np.zeros(2), theta=true_theta, timestep=d, number_of_samples=n)
+    elif model == "OU":
+        traj = simulators.OU_model(0.0, [0.0, 1.0, 1.0], d, n)
+    else:
+        raise ValueError("Invalid model type specified")
     trajectories.append((f"traj{i+1}", traj))
 
 # Build distance calculator on the real data to reuse its KDE grid and smoothing

@@ -48,7 +48,8 @@ class CalculateModelBasedDistance(CalculateDistance):
         if spans is None:
             n = round(len(real_trajectory)*timestep*0.3)
             n = n if n%2==1 else n+1
-            spans = [n]
+            m = int(max((n-1)/4 + 1, 2))
+            spans = [n,m]
         else:
             for span in spans:
                 if span < 3 or span%2 == 0:
@@ -78,20 +79,26 @@ class CalculateModelBasedDistance(CalculateDistance):
     def _spectrum(self, trajectory, timestep):
         # ----- Smoothed periodogram ------
         fs = 1.0 / timestep
-        window = signal.windows.tukey(M=trajectory.size, alpha=0.1)
-        frequencies, spectral_density = signal.periodogram(
+        window = signal.windows.tukey(M=trajectory.size, alpha=0.2)
+        frequencies, spectral_density = signal.welch(
             trajectory,
             fs=fs,
             window=window,
-            detrend="constant",
+            detrend="linear",
             return_onesided=True,
             scaling="density",
         )
 
-        # Smooth with modified boxcar kernels (ends half the weight)
-        spectral_density = signal.fftconvolve(spectral_density, self.smooth_ker, mode="same")
+        spectral_density[0] = spectral_density[1:4].mean()
+        
+        mask = frequencies <= 2
 
-        return frequencies, spectral_density
+        # Smooth with modified boxcar kernels (ends half the weight)
+        pad = len(self.smooth_ker) // 2
+        smooth_spec = np.r_[spectral_density[pad:0:-1], spectral_density, spectral_density[-2:-pad-2:-1]]
+        spectral_density = signal.fftconvolve(smooth_spec, self.smooth_ker, mode="same")[pad:pad+len(spectral_density)]
+
+        return frequencies[mask], spectral_density[mask]
 
     def _summarise(self, trajectory):
         # ------ Calculate summary of trajectory --------
@@ -174,6 +181,9 @@ class CalculatePENDistance(CalculateDistance):
             markov_order = 1, 
             device_name = "cpu",
             batch_size=32,
+            early_stopping_patience=10,
+            early_stopping_min_delta=0.0,
+            validation_split=0.1,
             ):
         
         # Lazy imports to prevent torch dependency in instances of this class
@@ -295,7 +305,18 @@ class CalculatePENDistance(CalculateDistance):
             torch.from_numpy(training_trajs),
             torch.from_numpy(training_thetas),
         )
-        loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=True)
+        # Train/val split for early stopping (always enabled; falls back to train loss if no split)
+        total_n = len(dataset)
+        bs = min(batch_size, total_n) if total_n > 0 else batch_size
+        if validation_split > 0.0 and total_n > 1:
+            val_n = max(1, int(total_n * float(validation_split)))
+            train_n = max(1, total_n - val_n)
+            train_subset, val_subset = torch.utils.data.random_split(dataset, [train_n, val_n])
+            loader = DataLoader(train_subset, batch_size=bs, shuffle=True)
+            val_loader = DataLoader(val_subset, batch_size=bs, shuffle=False)
+        else:
+            loader = DataLoader(dataset, batch_size=bs, shuffle=True)
+            val_loader = None
         
         # Define cost function
         def mean_euclidean_squared(pred, target):
@@ -306,9 +327,17 @@ class CalculatePENDistance(CalculateDistance):
         optimizer = torch.optim.Adam(summaryNN.parameters(), lr=1e-3)
 
         # Enter training
-        print("Beginning training loop...")
+        patience = max(1, int(early_stopping_patience))
+        print(
+            f"Beginning training loop... | early stopping: patience={patience}, "
+            f"min_delta={float(early_stopping_min_delta):.2e}, validation_split={float(validation_split):.2f}"
+        )
         summaryNN.train()
-        for _ in range(num_epochs):
+        best_loss = float("inf")
+        no_improve = 0
+        for epoch in range(num_epochs):
+            epoch_loss = 0.0
+            n_batches = 0
             for batch_x, batch_y in loader:
                 batch_x = batch_x.to(device)
                 batch_y = batch_y.to(device)
@@ -319,6 +348,47 @@ class CalculatePENDistance(CalculateDistance):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
+                epoch_loss += float(loss.detach().cpu().item())
+                n_batches += 1
+
+            # Compute average training loss for epoch
+            train_avg = epoch_loss / max(1, n_batches)
+            current = train_avg
+            if val_loader is not None:
+                summaryNN.eval()
+                with torch.no_grad():
+                    val_loss = 0.0
+                    val_batches = 0
+                    for vx, vy in val_loader:
+                        vx = vx.to(device)
+                        vy = vy.to(device)
+                        vp = summaryNN(vx)
+                        vloss = mean_euclidean_squared(vp, vy)
+                        val_loss += float(vloss.detach().cpu().item())
+                        val_batches += 1
+                val_avg = val_loss / max(1, val_batches)
+                current = val_avg
+                summaryNN.train()
+            else:
+                val_avg = None
+
+            # Per-epoch logging
+            if val_avg is None:
+                print(f"Epoch {epoch+1:3d}/{num_epochs} - train_loss: {train_avg:.6f} - best: {best_loss:.6f} - patience: {no_improve}/{patience}")
+            else:
+                print(f"Epoch {epoch+1:3d}/{num_epochs} - train_loss: {train_avg:.6f} - val_loss: {val_avg:.6f} - best: {best_loss:.6f} - patience: {no_improve}/{patience}")
+
+            # Early stopping check (always on)
+            if current < best_loss - float(early_stopping_min_delta):
+                print(f"  Improvement: best {best_loss:.6f} -> {current:.6f}")
+                best_loss = current
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}: best_loss={best_loss:.6f}, current={current:.6f}")
+                    break
         summaryNN.eval()
         print("finished!")
         # Exit training
