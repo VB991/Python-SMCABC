@@ -1,6 +1,8 @@
 import numpy as np
 from scipy import signal
+from scipy.stats import gaussian_kde
 from matplotlib import pyplot as plt
+import OU_MCMC
 import distances
 import simulators
 import SMCABC
@@ -109,20 +111,19 @@ def main(model, summary):
 
     if model == "FHN":
         # data = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
-        data = np.loadtxt("data_Delta0.08.txt")[0:625]
-        print(len(data))
+        true_theta = np.array([0.1, 1.5, 0.8, 0.3])
+        data = np.loadtxt("data_Delta0.08.txt")[0:n]
         simulator = simulators.FHN_model
         prior = MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6)
         mkv_order = 1
         x0 = np.zeros(2)
-        true_theta = np.array([0.1, 1.5, 0.8, 0.3])
     elif model == "OU":
-        data = simulators.OU_model(0.0, [0.0, 1.0, np.sqrt(2)], d, n)
+        true_theta = np.array([3, 1, 1], dtype=float)
+        data = simulators.OU_model(0.0, true_theta, d, n)
         simulator = simulators.OU_model
-        prior = UniformND([(-2,2), (0.1, 10), (0.1, 10)])
+        prior = UniformND([(-5,5), (0.1, 10), (0.1, 10)])
         mkv_order = 0
         x0 = 0.0
-        true_theta = np.array([0.0, 1.0, np.sqrt(2.0)])
     else:
         raise ValueError("Invalid model type specified")
 
@@ -136,14 +137,14 @@ def main(model, summary):
         dist_calc.create_and_train_PEN(
             markov_order=mkv_order,
             model_simulator = simulator,
-            training_thetas = prior.rvs(100000),
+            training_thetas = prior.rvs(10000),
             traj_initial_value = np.zeros(2),
             real_trajectory=data,
             timestep = d,
             num_epochs = 50,
             device_name = "cuda",
             early_stopping_patience=5,
-            early_stopping_min_delta=0.1
+            early_stopping_loss_drop=0.1
         )
     else:
         raise ValueError("Invalid summary type specified")
@@ -151,7 +152,7 @@ def main(model, summary):
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
         prior=prior,
-        data = data, timestep=d, distance_calculator = dist_calc, num_samples=1000, simulation_budget=1000000,
+        data = data, timestep=d, distance_calculator = dist_calc, num_samples=100, simulation_budget=100000,
           initial_value=x0,
         model_simulator = simulator
         )
@@ -160,31 +161,81 @@ def main(model, summary):
 
 
 
-    # Overlay prior vs posterior per dimension with scroll navigation
-    prior_for_plot = prior
-    prior_samples = prior_for_plot.rvs(size=20000)
+    # ----- Display Results ------
+
+    # Optionally run OU-MCMC and collect a chain for overlay (OU model only)
+    mcmc_chain = None
+    if model == "OU":
+        # Use a prior draw as initial theta to avoid biasing with true_theta
+        theta_init = prior.rvs(size=1)[0]
+        # Keep iterations <= 10000 to avoid adaptive branch issues in the script
+        mcmc_chain = OU_MCMC.OU_MCMC(theta_init, prior, d, data, num_iterations=100000)
 
     dims = samples.shape[1]
+    # Precompute KDE curves for all dimensions to make navigation instant
+    xs_list = []
+    post_y_list = []
+    mcmc_y_list = []
+    for d in range(dims):
+        vals = samples[:, d]
+        # Ensure the entire prior width is included
+        if isinstance(prior, UniformND):
+            vmin = float(prior.lows[d])
+            vmax = float(prior.highs[d])
+        elif isinstance(prior, MultivariateUniform):
+            if d == 0:
+                vmin = float(prior.bounds[0, 0])
+                vmax = float(prior.bounds[0, 1])
+            elif d == 1:
+                vmin = float(prior.bounds[0, 0]) / 4.0
+                vmax = float(prior.second_upper)
+            else:
+                vmin = float(prior.bounds[d - 1, 0])
+                vmax = float(prior.bounds[d - 1, 1])
+        else:
+            vmin = float(np.min(vals))
+            vmax = float(np.max(vals))
+        if mcmc_chain is not None and mcmc_chain.shape[0] > 1:
+            burn = max(1000, mcmc_chain.shape[0] // 5)
+            mvals = np.asarray(mcmc_chain[burn:, d]).squeeze()
+            if mvals.size > 0 and np.isfinite(mvals).any():
+                vmin = float(min(vmin, np.min(mvals)))
+                vmax = float(max(vmax, np.max(mvals)))
+        # Also include SMC samples span
+        vmin = float(min(vmin, np.min(vals)))
+        vmax = float(max(vmax, np.max(vals)))
+        pad = 0.05 * (vmax - vmin + 1e-12)
+        xmin = vmin - pad
+        xmax = vmax + pad
+        xs = np.linspace(xmin, xmax, 400)
+        # Posterior KDE (weighted)
+        kde_post = gaussian_kde(vals, weights=weights)
+        post_y = kde_post(xs)
+        xs_list.append(xs)
+        post_y_list.append(post_y)
+        # Optional MCMC KDE
+        if mcmc_chain is not None and mcmc_chain.shape[0] > 1:
+            try:
+                kde_mcmc = gaussian_kde(mvals)
+                mcmc_y = kde_mcmc(xs)
+            except Exception:
+                mcmc_y = None
+        else:
+            mcmc_y = None
+        mcmc_y_list.append(mcmc_y)
+
     fig, ax = plt.subplots()
     current_dim = [0]
 
     def plot_dim(d):
         ax.clear()
-        # Shared range for fair overlay
-        x_min = float(min(np.min(samples[:, d]), np.min(prior_samples[:, d])))
-        x_max = float(max(np.max(samples[:, d]), np.max(prior_samples[:, d])))
-        pad = 0.05 * (x_max - x_min + 1e-12)
-        x_min -= pad
-        x_max += pad
-        bins = 100
-        ax.hist(prior_samples[:, d], bins=bins, range=(x_min, x_max), density=True,
-                histtype='step', linewidth=2, label='Prior')
-        ax.hist(samples[:, d], bins=bins, range=(x_min, x_max), weights=weights,
-                density=True, alpha=0.4, label='Posterior')
-        ax.set_title(f'Dimension {d} - use mouse wheel to scroll')
+        ax.plot(xs_list[d], post_y_list[d], color='C1', lw=2, label='Posterior (SMCABC KDE)')
+        if mcmc_y_list[d] is not None:
+            ax.plot(xs_list[d], mcmc_y_list[d], color='C2', lw=2, linestyle='--', label='OU-MCMC (KDE)')
+        ax.set_title(f'Dimension {d} — use mouse wheel or arrow keys')
         ax.set_xlabel('Value')
         ax.set_ylabel('Density')
-        # Overlay true parameter value as a vertical line
+        ax.set_title(f'Dimension {d} — use mouse wheel to switch')
         ax.axvline(true_theta[d], color='k', linestyle='--', linewidth=2, label='True value')
         ax.legend()
         fig.canvas.draw_idle()

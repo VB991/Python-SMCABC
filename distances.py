@@ -167,23 +167,28 @@ class CalculateModelBasedDistance(CalculateDistance):
 
     
 class CalculatePENDistance(CalculateDistance):
-    def __init__(
-        self
-    ):
+    def __init__(self):
         self.layers = None  # Dictionary containing PEN weights and biases
         self.k = None       # Markov order
+
+    # ----- 
+    def _simulate_training_trajs(self, training_thetas, traj_initial_value, model_simulator, timestep, num_samples):
+        print("Simulating training trajectories...")
+        training_trajs = []
+        for theta in training_thetas:
+            training_trajs.append(model_simulator(traj_initial_value, theta, timestep, num_samples))
+        training_trajs = np.array(training_trajs)
+        print("finished!")
+        return training_trajs
+
 
     # ----- Alternative Constructor -----
     def create_and_train_PEN(
             self, 
-            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep, 
-            num_epochs, 
+            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep,  
             markov_order = 1, 
-            device_name = "cpu",
-            batch_size=32,
-            early_stopping_patience=10,
-            early_stopping_min_delta=0.0,
-            validation_split=0.1,
+            device_name = "cpu", batch_size=32, num_epochs=25,
+            early_stopping_patience=10, early_stopping_loss_drop=0.0, validation_split=0.1,
             ):
         
         # Lazy imports to prevent torch dependency in instances of this class
@@ -254,16 +259,10 @@ class CalculatePENDistance(CalculateDistance):
 
 
         # ----- PEN -------
-
-        # Create training data from simulator
         print("Creating PEN:")
-        print("Simulating training trajectories...")
-        training_trajs = []
-        for theta in training_thetas:
-            training_trajs.append(model_simulator(traj_initial_value, theta, timestep, real_trajectory.size))
-        training_trajs = np.array(training_trajs)
-        print("finished!")
         
+        training_trajs = self._simulate_training_trajs(training_thetas, traj_initial_value, model_simulator, timestep, num_samples=len(real_trajectory))
+
         #  Ensure correct type for training data
         training_trajs = np.asarray(training_trajs, dtype=np.float32)
         training_thetas = np.asarray(training_thetas, dtype=np.float32)
@@ -287,7 +286,6 @@ class CalculatePENDistance(CalculateDistance):
         elif device_name not in allowed:
             raise ValueError(f"Invalid device '{device_name}'. Must be one of {allowed}.")
 
-
         # Move summaryNN to training device
         if device_name == "cpu":
             print("Training device set to CPU")
@@ -305,6 +303,7 @@ class CalculatePENDistance(CalculateDistance):
             torch.from_numpy(training_trajs),
             torch.from_numpy(training_thetas),
         )
+
         # Train/val split for early stopping (always enabled; falls back to train loss if no split)
         total_n = len(dataset)
         bs = min(batch_size, total_n) if total_n > 0 else batch_size
@@ -330,7 +329,7 @@ class CalculatePENDistance(CalculateDistance):
         patience = max(1, int(early_stopping_patience))
         print(
             f"Beginning training loop... | early stopping: patience={patience}, "
-            f"min_delta={float(early_stopping_min_delta):.2e}, validation_split={float(validation_split):.2f}"
+            f"min_delta={float(early_stopping_loss_drop):.2f}, validation_split={float(validation_split):.2f}"
         )
         summaryNN.train()
         best_loss = float("inf")
@@ -380,7 +379,7 @@ class CalculatePENDistance(CalculateDistance):
                 print(f"Epoch {epoch+1:3d}/{num_epochs} - train_loss: {train_avg:.6f} - val_loss: {val_avg:.6f} - best: {best_loss:.6f} - patience: {no_improve}/{patience}")
 
             # Early stopping check (always on)
-            if current < best_loss - float(early_stopping_min_delta):
+            if current < best_loss - float(early_stopping_loss_drop):
                 print(f"  Improvement: best {best_loss:.6f} -> {current:.6f}")
                 best_loss = current
                 no_improve = 0
