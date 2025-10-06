@@ -1,107 +1,23 @@
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
-from scipy import signal
-from scipy.stats import gaussian_kde
 from matplotlib import pyplot as plt
+
 import OU_MCMC
+import SMCABC
 import distances
 import simulators
-import SMCABC
+from kde_utils import (
+    build_kde_grids,
+    evaluate_mcmc_kdes,
+    evaluate_weighted_kdes,
+    plot_saved_kde_runs,
+    save_kde_results,
+)
+from priors import FHNMultivariateUniform, UniformND
 
-class FHNMultivariateUniform:
-    def __init__(self, bounds, second_upper):
-        """
-        bounds: list of (a, b) for each dimension except the second
-        second_upper: upper bound for the second variable (user input)
-        """
-        self.bounds = np.array(bounds, dtype=float)
-        self.second_upper = second_upper
-        self.dim = len(bounds) + 1
-
-    def rvs(self, size=1, random_state=None):
-        rng = np.random.default_rng(random_state)
-        # Sample first variable
-        epsilon = rng.uniform(low=self.bounds[0, 0], high=self.bounds[0, 1], size=size)
-        # Sample second variable conditional on epsilon
-        second_low = epsilon / 4
-        second_high = np.full(size, self.second_upper)
-        second = rng.uniform(low=second_low, high=second_high)
-        # Sample remaining variables
-        others = np.column_stack([
-            rng.uniform(low=a, high=b, size=size)
-            for (a, b) in self.bounds[1:]
-        ])
-        samples = np.column_stack([epsilon, second, others])
-        return samples
-
-    def pdf(self, x):
-        x = np.atleast_2d(x)
-        epsilon = x[:, 0]
-        second = x[:, 1]
-        # Check bounds for first variable
-        cond1 = (epsilon >= self.bounds[0, 0]) & (epsilon <= self.bounds[0, 1])
-        # Check bounds for second variable
-        cond2 = (second >= epsilon / 4) & (second <= self.second_upper)
-        # Check bounds for remaining variables
-        cond3 = np.ones(x.shape[0], dtype=bool)
-        for i, (a, b) in enumerate(self.bounds[1:], start=2):
-            cond3 &= (x[:, i] >= a) & (x[:, i] <= b)
-        # Compute density
-        vol_epsilon = self.bounds[0, 1] - self.bounds[0, 0]
-        vol_second = self.second_upper - (epsilon / 4)
-        vol_others = np.prod([b - a for (a, b) in self.bounds[1:]])
-        density = 1.0 / (vol_epsilon * vol_second * vol_others)
-        inside = cond1 & cond2 & cond3
-        return np.where(inside, density, 0.0)
-
-    @property
-    def support(self):
-        # Support for second variable depends on epsilon
-        return self.bounds, self.second_upper
-
-
-class UniformND:
-    """Independent uniform prior over an N-dimensional box.
-
-    bounds = [(low_1, high_1), ..., (low_D, high_D)]
-    """
-    def __init__(self, bounds):
-        bounds = np.asarray(bounds, dtype=float)
-        if bounds.ndim != 2 or bounds.shape[1] != 2:
-            raise ValueError("Expected bounds shape (D,2) for D parameters")
-        self.bounds = bounds
-        self.lows = bounds[:, 0]
-        self.highs = bounds[:, 1]
-        if np.any(self.highs <= self.lows):
-            raise ValueError("Each upper bound must be > lower bound")
-        self.dim = bounds.shape[0]
-        self.volume = float(np.prod(self.highs - self.lows))
-
-    def rvs(self, size=1, random_state=None):
-        rng = np.random.default_rng(random_state)
-        return rng.uniform(self.lows, self.highs, size=(size, self.dim)).astype(float)
-
-    def pdf(self, x):
-        x = np.asarray(x, dtype=float)
-        if x.ndim == 1:
-            if x.shape[0] != self.dim:
-                raise ValueError(f"x must have {self.dim} elements")
-            inside = np.all((x >= self.lows) & (x <= self.highs))
-            return (1.0 / self.volume) if inside else 0.0
-        elif x.ndim == 2:
-            if x.shape[1] != self.dim:
-                raise ValueError(f"x must have shape (n, {self.dim})")
-            inside = np.all((x >= self.lows) & (x <= self.highs), axis=1)
-            out = np.zeros(x.shape[0], dtype=float)
-            out[inside] = 1.0 / self.volume
-            return out
-        else:
-            raise ValueError("x must be a 1D or 2D array")
-
-    @property
-    def support(self):
-        return self.bounds
-
-def main(model, summary):
+def main(model, summary, kde_output_dir=None):
     n = 2500
     d = 0.08
 
@@ -172,83 +88,31 @@ def main(model, summary):
         mcmc_chain = OU_MCMC.OU_MCMC(theta_init, prior, d, data, num_iterations=100000)
 
     dims = samples.shape[1]
-    # Precompute KDE curves for all dimensions to make navigation instant
-    xs_list = []
-    post_y_list = []
-    mcmc_y_list = []
-    for d in range(dims):
-        vals = samples[:, d]
-        # Ensure the entire prior width is included
-        if isinstance(prior, UniformND):
-            vmin = float(prior.lows[d])
-            vmax = float(prior.highs[d])
-        elif isinstance(prior, FHNMultivariateUniform):
-            if d == 0:
-                vmin = float(prior.bounds[0, 0])
-                vmax = float(prior.bounds[0, 1])
-            elif d == 1:
-                vmin = float(prior.bounds[0, 0]) / 4.0
-                vmax = float(prior.second_upper)
-            else:
-                vmin = float(prior.bounds[d - 1, 0])
-                vmax = float(prior.bounds[d - 1, 1])
-        else:
-            vmin = float(np.min(vals))
-            vmax = float(np.max(vals))
-        if mcmc_chain is not None and mcmc_chain.shape[0] > 1:
-            burn = max(1000, mcmc_chain.shape[0] // 5)
-            mvals = np.asarray(mcmc_chain[burn:, d]).squeeze()
-            if mvals.size > 0 and np.isfinite(mvals).any():
-                vmin = float(min(vmin, np.min(mvals)))
-                vmax = float(max(vmax, np.max(mvals)))
-        # Also include SMC samples span
-        vmin = float(min(vmin, np.min(vals)))
-        vmax = float(max(vmax, np.max(vals)))
-        pad = 0.05 * (vmax - vmin + 1e-12)
-        xmin = vmin - pad
-        xmax = vmax + pad
-        xs = np.linspace(xmin, xmax, 400)
-        # Posterior KDE (weighted)
-        kde_post = gaussian_kde(vals, weights=weights)
-        post_y = kde_post(xs)
-        xs_list.append(xs)
-        post_y_list.append(post_y)
-        # Optional MCMC KDE
-        if mcmc_chain is not None and mcmc_chain.shape[0] > 1:
-            try:
-                kde_mcmc = gaussian_kde(mvals)
-                mcmc_y = kde_mcmc(xs)
-            except Exception:
-                mcmc_y = None
-        else:
-            mcmc_y = None
-        mcmc_y_list.append(mcmc_y)
+    grids = build_kde_grids(prior, dims)
+    smcabc_kdes = evaluate_weighted_kdes(samples, weights, grids)
+    mcmc_kdes = evaluate_mcmc_kdes(mcmc_chain, grids)
 
-    fig, ax = plt.subplots()
-    current_dim = [0]
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    metadata = {
+        "model": model,
+        "summary": summary,
+        "timestamp": timestamp,
+        "num_samples": int(samples.shape[0]),
+        "num_grid_points": int(grids.shape[1]),
+        "true_theta": true_theta.tolist(),
+    }
 
-    def plot_dim(d):
-        ax.clear()
-        ax.plot(xs_list[d], post_y_list[d], color='C1', lw=2, label='SMCABC')
-        if mcmc_y_list[d] is not None:
-            ax.plot(xs_list[d], mcmc_y_list[d], color='C2', lw=2, linestyle='--', label='MCMC')
-        ax.set_title(f'Dimension {d+1}')
-        ax.set_xlabel('Value')
-        ax.set_ylabel('Density')
-        ax.axvline(true_theta[d], color='k', linestyle='--', linewidth=2, label='True value')
-        ax.legend()
-        fig.canvas.draw_idle()
+    if kde_output_dir is None:
+        output_dir = Path("Experimental Results") / "KDEs"
+    else:
+        output_dir = Path(kde_output_dir)
+    filename = f"{model}_{summary}_{timestamp}.npz"
+    kde_path = save_kde_results(output_dir / filename, grids, smcabc_kdes, metadata, mcmc_kdes)
+    print(f"Saved KDE evaluations to {kde_path}")
 
-    def on_scroll(event):
-        if event.button == 'up':
-            current_dim[0] = (current_dim[0] + 1) % dims
-        elif event.button == 'down':
-            current_dim[0] = (current_dim[0] - 1) % dims
-        plot_dim(current_dim[0])
-
-    fig.canvas.mpl_connect('scroll_event', on_scroll)
-    plot_dim(current_dim[0])
-    plt.show()
+    plot_saved_kde_runs([kde_path], true_theta=true_theta)
 
 if __name__ == "__main__":
-    main("FHN", "MODEL")
+    # Update this path to route KDE outputs elsewhere if desired
+    KDE_OUTPUT_DIR = Path("Experimental Results") / "KDEs"
+    main("FHN", "MODEL", kde_output_dir="Experimental Results\\FHN-model\\Observation1-delta0.08")
