@@ -1,108 +1,52 @@
+import json
+from pathlib import Path
 import numpy as np
 from scipy import signal
 from scipy.stats import gaussian_kde
+import matplotlib as mpl
+mpl.use("Agg")
 from matplotlib import pyplot as plt
 import OU_MCMC
 import distances
 import simulators
 import SMCABC
+from priors import MultivariateUniform, UniformND
 
-class MultivariateUniform:
-    def __init__(self, bounds, second_upper):
-        """
-        bounds: list of (a, b) for each dimension except the second
-        second_upper: upper bound for the second variable (user input)
-        """
-        self.bounds = np.array(bounds, dtype=float)
-        self.second_upper = second_upper
-        self.dim = len(bounds) + 1
+def _save_results(output_path, samples, weights, meta):
+    """Save SMCABC results to the given path.
 
-    def rvs(self, size=1, random_state=None):
-        rng = np.random.default_rng(random_state)
-        # Sample first variable
-        epsilon = rng.uniform(low=self.bounds[0, 0], high=self.bounds[0, 1], size=size)
-        # Sample second variable conditional on epsilon
-        second_low = epsilon / 4
-        second_high = np.full(size, self.second_upper)
-        second = rng.uniform(low=second_low, high=second_high)
-        # Sample remaining variables
-        others = np.column_stack([
-            rng.uniform(low=a, high=b, size=size)
-            for (a, b) in self.bounds[1:]
-        ])
-        samples = np.column_stack([epsilon, second, others])
-        return samples
-
-    def pdf(self, x):
-        x = np.atleast_2d(x)
-        epsilon = x[:, 0]
-        second = x[:, 1]
-        # Check bounds for first variable
-        cond1 = (epsilon >= self.bounds[0, 0]) & (epsilon <= self.bounds[0, 1])
-        # Check bounds for second variable
-        cond2 = (second >= epsilon / 4) & (second <= self.second_upper)
-        # Check bounds for remaining variables
-        cond3 = np.ones(x.shape[0], dtype=bool)
-        for i, (a, b) in enumerate(self.bounds[1:], start=2):
-            cond3 &= (x[:, i] >= a) & (x[:, i] <= b)
-        # Compute density
-        vol_epsilon = self.bounds[0, 1] - self.bounds[0, 0]
-        vol_second = self.second_upper - (epsilon / 4)
-        vol_others = np.prod([b - a for (a, b) in self.bounds[1:]])
-        density = 1.0 / (vol_epsilon * vol_second * vol_others)
-        inside = cond1 & cond2 & cond3
-        return np.where(inside, density, 0.0)
-
-    @property
-    def support(self):
-        # Support for second variable depends on epsilon
-        return self.bounds, self.second_upper
-
-
-class UniformND:
-    """Independent uniform prior over an N-dimensional box.
-
-    bounds = [(low_1, high_1), ..., (low_D, high_D)]
+    Supports `.npz` (compressed) and `.csv`. For `.csv`, also writes a
+    sidecar `.json` with metadata.
     """
-    def __init__(self, bounds):
-        bounds = np.asarray(bounds, dtype=float)
-        if bounds.ndim != 2 or bounds.shape[1] != 2:
-            raise ValueError("Expected bounds shape (D,2) for D parameters")
-        self.bounds = bounds
-        self.lows = bounds[:, 0]
-        self.highs = bounds[:, 1]
-        if np.any(self.highs <= self.lows):
-            raise ValueError("Each upper bound must be > lower bound")
-        self.dim = bounds.shape[0]
-        self.volume = float(np.prod(self.highs - self.lows))
+    if not output_path:
+        return
+    p = Path(output_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
 
-    def rvs(self, size=1, random_state=None):
-        rng = np.random.default_rng(random_state)
-        return rng.uniform(self.lows, self.highs, size=(size, self.dim)).astype(float)
-
-    def pdf(self, x):
-        x = np.asarray(x, dtype=float)
-        if x.ndim == 1:
-            if x.shape[0] != self.dim:
-                raise ValueError(f"x must have {self.dim} elements")
-            inside = np.all((x >= self.lows) & (x <= self.highs))
-            return (1.0 / self.volume) if inside else 0.0
-        elif x.ndim == 2:
-            if x.shape[1] != self.dim:
-                raise ValueError(f"x must have shape (n, {self.dim})")
-            inside = np.all((x >= self.lows) & (x <= self.highs), axis=1)
-            out = np.zeros(x.shape[0], dtype=float)
-            out[inside] = 1.0 / self.volume
-            return out
+    try:
+        if p.suffix.lower() == ".csv":
+            arr = np.hstack([samples, weights.reshape(-1, 1)])
+            header_cols = [f"theta_{i}" for i in range(samples.shape[1])] + ["weight"]
+            header = ",".join(header_cols)
+            np.savetxt(p, arr, delimiter=",", header=header, comments="")
+            # Write metadata sidecar
+            meta_path = p.with_suffix(".json")
+            with meta_path.open("w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
         else:
-            raise ValueError("x must be a 1D or 2D array")
+            # Default to NPZ for anything else (.npz recommended)
+            np.savez_compressed(
+                p,
+                samples=samples,
+                weights=weights,
+                meta=json.dumps(meta),
+            )
+    except Exception as e:
+        print(f"Warning: failed to save results to '{p}': {e}")
 
-    @property
-    def support(self):
-        return self.bounds
 
-def main(model, summary):
-    n = 625
+def main(model, summary, output_path=None):
+    n = 2500
     d = 0.08
     T = n*d
     # observation data comes from this:
@@ -110,7 +54,6 @@ def main(model, summary):
     # np.savetxt("observation.txt", data)
 
     if model == "FHN":
-        # data = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
         true_theta = np.array([0.1, 1.5, 0.8, 0.3])
         data = np.loadtxt("data_Delta0.08.txt")[0:n]
         simulator = simulators.FHN_model
@@ -127,8 +70,7 @@ def main(model, summary):
     else:
         raise ValueError("Invalid model type specified")
 
-    plt.plot(data)
-    plt.show()
+    # Avoid interactive plotting before multiprocessing (can clash with TkAgg)
     
     if summary == "MODEL":
         dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
@@ -149,15 +91,28 @@ def main(model, summary):
     else:
         raise ValueError("Invalid summary type specified")
 
+    # Ensure no open figures before starting multiprocessing
+    plt.close('all')
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
         prior=prior,
-        data = data, timestep=d, distance_calculator = dist_calc, num_samples=100, simulation_budget=100000,
+        data = data, timestep=d, distance_calculator = dist_calc, num_samples=1000, simulation_budget=1000000,
           initial_value=x0,
         model_simulator = simulator
         )
-    print("True mean:",[0.1, 1.5, 0.8, 0.3])
-    print("Posterior:",np.average(samples, axis=0, weights=weights))
+    # Persist results if requested
+    meta = {
+        "model": model,
+        "summary": summary,
+        "timestep": float(d),
+        "n_samples": int(samples.shape[0]),
+        "dims": int(samples.shape[1]),
+        "true_theta": [float(x) for x in np.asarray(true_theta).tolist()],
+    }
+    _save_results(output_path, samples, weights, meta)
+
+    print("True mean:", true_theta.tolist())
+    print("Posterior:", np.average(samples, axis=0, weights=weights))
 
 
 
@@ -169,7 +124,7 @@ def main(model, summary):
         # Use a prior draw as initial theta to avoid biasing with true_theta
         theta_init = prior.rvs(size=1)[0]
         # Keep iterations <= 10000 to avoid adaptive branch issues in the script
-        mcmc_chain = OU_MCMC.OU_MCMC(theta_init, prior, d, data, num_iterations=100000)
+        mcmc_chain = OU_MCMC.OU_MCMC(theta_init, prior, d, data, num_iterations=1000000)
 
     dims = samples.shape[1]
     # Precompute KDE curves for all dimensions to make navigation instant
@@ -229,13 +184,12 @@ def main(model, summary):
 
     def plot_dim(d):
         ax.clear()
-        ax.plot(xs_list[d], post_y_list[d], color='C1', lw=2, label='Posterior (SMCABC KDE)')
+        ax.plot(xs_list[d], post_y_list[d], color='C1', lw=2, label='SMCABC')
         if mcmc_y_list[d] is not None:
             ax.plot(xs_list[d], mcmc_y_list[d], color='C2', lw=2, linestyle='--', label='OU-MCMC (KDE)')
-        ax.set_title(f'Dimension {d} — use mouse wheel or arrow keys')
+        ax.set_title(f'Dimension {d+1}')
         ax.set_xlabel('Value')
         ax.set_ylabel('Density')
-        ax.set_title(f'Dimension {d} — use mouse wheel to switch')
         ax.axvline(true_theta[d], color='k', linestyle='--', linewidth=2, label='True value')
         ax.legend()
         fig.canvas.draw_idle()
@@ -252,4 +206,4 @@ def main(model, summary):
     plt.show()
 
 if __name__ == "__main__":
-    main("FHN", "PEN")
+    main("FHN", "MODEL")

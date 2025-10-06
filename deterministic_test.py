@@ -37,7 +37,13 @@ def ode_simulator(initial_value: np.ndarray | float,
     Returns:
         1D numpy array of length `number_of_samples`
     """
-    a, b, c, d = map(float, theta)
+    # Robustly coerce theta to a flat length-4 vector of floats
+    th = np.asarray(theta, dtype=np.float64)
+    if th.ndim > 1:
+        th = th.reshape(-1)
+    if th.size != 4:
+        raise ValueError(f"theta must have 4 elements, got shape {np.shape(theta)}")
+    a, b, c, d = th.tolist()
     dt = float(timestep)
     n = int(number_of_samples)
 
@@ -141,7 +147,7 @@ def main():
         model_simulator=ode_simulator,
         distance_calculator=dist_calc,
         num_samples=100,
-        simulation_budget=100000,
+        simulation_budget=2500,
     )
 
     # Report results
@@ -155,4 +161,3 @@ def main():
 if __name__ == "__main__":
     # On Windows, this guard is required for multiprocessing used by SMCABC
     main()
-

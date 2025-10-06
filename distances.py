@@ -4,7 +4,6 @@ from numpy.lib.stride_tricks import sliding_window_view
 from KDEpy.FFTKDE import FFTKDE
 from scipy import signal, integrate
 
-import matplotlib.pyplot as plt
 
 
 
@@ -145,13 +144,6 @@ class CalculateModelBasedDistance(CalculateDistance):
             np.zeros(n_right_points, dtype=float),
         ))
         
-        # FOR TESTING PURPOSES
-        # plt.plot(grid, sim_pdf, linestyle="dotted")
-        # plt.plot(grid, real_pdf)
-        # plt.show()
-        # plt.plot(freqs, spectral_density2, linestyle="dotted")
-        # plt.plot(freqs, spectral_density1)
-        # plt.show()
 
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
         pdf_distance = integrate.trapezoid(np.abs(real_pdf - sim_pdf), grid)
