@@ -229,13 +229,12 @@ def main(model, summary):
 
     def plot_dim(d):
         ax.clear()
-        ax.plot(xs_list[d], post_y_list[d], color='C1', lw=2, label='Posterior (SMCABC KDE)')
+        ax.plot(xs_list[d], post_y_list[d], color='C1', lw=2, label='SMCABC')
         if mcmc_y_list[d] is not None:
-            ax.plot(xs_list[d], mcmc_y_list[d], color='C2', lw=2, linestyle='--', label='OU-MCMC (KDE)')
-        ax.set_title(f'Dimension {d} — use mouse wheel or arrow keys')
+            ax.plot(xs_list[d], mcmc_y_list[d], color='C2', lw=2, linestyle='--', label='MCMC')
+        ax.set_title(f'Dimension {d+1}')
         ax.set_xlabel('Value')
         ax.set_ylabel('Density')
-        ax.set_title(f'Dimension {d} — use mouse wheel to switch')
         ax.axvline(true_theta[d], color='k', linestyle='--', linewidth=2, label='True value')
         ax.legend()
         fig.canvas.draw_idle()
