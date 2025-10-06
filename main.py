@@ -7,7 +7,7 @@ import distances
 import simulators
 import SMCABC
 
-class MultivariateUniform:
+class FHNMultivariateUniform:
     def __init__(self, bounds, second_upper):
         """
         bounds: list of (a, b) for each dimension except the second
@@ -102,19 +102,15 @@ class UniformND:
         return self.bounds
 
 def main(model, summary):
-    n = 625
+    n = 2500
     d = 0.08
-    T = n*d
-    # observation data comes from this:
-    # data = simulators.FHN_model(initial_value = np.zeros(2), theta = [0.1, 1.5, 0.8, 0.3], timestep=0.0001, number_of_samples = 2000000)
-    # np.savetxt("observation.txt", data)
 
     if model == "FHN":
-        # data = np.loadtxt("observation.txt")[0:int(T/0.0001):int(d/0.0001)]
         true_theta = np.array([0.1, 1.5, 0.8, 0.3])
-        data = np.loadtxt("data_Delta0.08.txt")[0:n]
+        data = np.loadtxt("Observations\\FHN\\Observation1\\data_Delta0.08.txt")
         simulator = simulators.FHN_model
-        prior = MultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6)
+        prior = FHNMultivariateUniform([(0.01,0.5),(0.01,6),(0.01,1)],6)
+        dimension_weights = 1/np.array([0.5,6,6,1])
         mkv_order = 1
         x0 = np.zeros(2)
     elif model == "OU":
@@ -122,7 +118,8 @@ def main(model, summary):
         data = simulators.OU_model(0.0, true_theta, d, n)
         simulator = simulators.OU_model
         prior = UniformND([(-5,5), (0.1, 10), (0.1, 10)])
-        mkv_order = 0
+        dimension_weights = 1/np.array([10,10,10])
+        mkv_order = 1
         x0 = 0.0
     else:
         raise ValueError("Invalid model type specified")
@@ -133,26 +130,29 @@ def main(model, summary):
     if summary == "MODEL":
         dist_calc = distances.CalculateModelBasedDistance(data, 0.08)
     elif summary == "PEN":
-        dist_calc = distances.CalculatePENDistance()
-        dist_calc.create_and_train_PEN(
-            markov_order=mkv_order,
-            model_simulator = simulator,
-            training_thetas = prior.rvs(10000),
-            traj_initial_value = np.zeros(2),
-            real_trajectory=data,
-            timestep = d,
-            num_epochs = 50,
-            device_name = "cuda",
-            early_stopping_patience=5,
-            early_stopping_loss_drop=0.1
-        )
+        # dist_calc = distances.CalculatePENDistance()
+        # dist_calc.create_and_train_PEN(
+        #     markov_order=mkv_order,
+        #     model_simulator = simulator,
+        #     training_thetas = prior.rvs(100000),
+        #     dimension_weights = dimension_weights,
+        #     traj_initial_value = np.zeros(2),
+        #     real_trajectory=data,
+        #     timestep = d,
+        #     num_epochs = 500,
+        #     device_name = "cuda",
+        #     early_stopping_patience=15,
+        #     early_stopping_loss_drop=0.001
+        # )
+        # dist_calc.save_pen("TrainedNNs\\0.08,2500_FHN_PEN,weightedMSE.npz")
+        dist_calc = distances.CalculatePENDistance.load_pen("TrainedNNs\\0.08,2500_FHN_PEN,weightedMSE.npz", data, d)
     else:
         raise ValueError("Invalid summary type specified")
 
     samples, weights = SMCABC.sample_posterior( 
         threshold_percentile=0.5,
         prior=prior,
-        data = data, timestep=d, distance_calculator = dist_calc, num_samples=100, simulation_budget=100000,
+        data = data, timestep=d, distance_calculator = dist_calc, num_samples=1000, simulation_budget=1000000,
           initial_value=x0,
         model_simulator = simulator
         )
@@ -182,7 +182,7 @@ def main(model, summary):
         if isinstance(prior, UniformND):
             vmin = float(prior.lows[d])
             vmax = float(prior.highs[d])
-        elif isinstance(prior, MultivariateUniform):
+        elif isinstance(prior, FHNMultivariateUniform):
             if d == 0:
                 vmin = float(prior.bounds[0, 0])
                 vmax = float(prior.bounds[0, 1])
@@ -251,4 +251,4 @@ def main(model, summary):
     plt.show()
 
 if __name__ == "__main__":
-    main("FHN", "PEN")
+    main("FHN", "MODEL")

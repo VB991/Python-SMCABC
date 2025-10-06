@@ -3,8 +3,133 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from KDEpy.FFTKDE import FFTKDE
 from scipy import signal, integrate
+from concurrent.futures import ProcessPoolExecutor
+from numba import njit
 
-import matplotlib.pyplot as plt
+# Globals used only by multiprocessing workers for PEN data simulation
+_PEN_SIM_X0 = None
+_PEN_SIM_DT = None
+_PEN_SIM_N = None
+_PEN_SIM_MODEL = None
+
+def _pen_worker_init(x0, timestep, num_samples, model_simulator):
+    """Initializer for worker processes; stores shared args in globals.
+
+    Using globals avoids re‑serializing large immutable inputs for each task
+    and keeps the worker function picklable on Windows (spawn start method).
+    """
+    global _PEN_SIM_X0, _PEN_SIM_DT, _PEN_SIM_N, _PEN_SIM_MODEL
+    _PEN_SIM_X0 = x0
+    _PEN_SIM_DT = timestep
+    _PEN_SIM_N = num_samples
+    _PEN_SIM_MODEL = model_simulator
+
+
+def _pen_sim_worker(theta_batch):
+    """Simulate a batch of training trajectories for a batch of parameter vectors."""
+    out = []
+    for theta in theta_batch:
+        traj = _PEN_SIM_MODEL(_PEN_SIM_X0, theta, _PEN_SIM_DT, _PEN_SIM_N)
+        out.append(np.asarray(traj, dtype=np.float32))
+    return out
+
+
+@njit(fastmath=True, cache=True)
+def _pen_feedforward_jit(
+    trajectory,
+    k,
+    W_e_in, b_e_in,
+    W_e_hidden, b_e_hidden,
+    W_e_out, b_e_out,
+    W_h_in, b_h_in,
+    W_h1, b_h1,
+    W_h2, b_h2,
+    W_h_out, b_h_out,
+):
+    n = trajectory.shape[0]
+    nb = n - k
+
+    enc1_out = W_e_in.shape[0]
+    enc2_out = W_e_hidden.shape[0]
+    enc3_out = W_e_out.shape[0]
+
+    # Temp buffers
+    h1 = np.empty(enc1_out, dtype=np.float32)
+    h2 = np.empty(enc2_out, dtype=np.float32)
+    h3 = np.empty(enc3_out, dtype=np.float32)
+    aggregated = np.zeros(enc3_out, dtype=np.float32)
+
+    # Encode blocks and sum
+    for i in range(nb):
+        # x_block = trajectory[i:i+k+1]
+        # First encoder layer: y = ReLU(b + W @ x)
+        for j in range(enc1_out):
+            s = b_e_in[j]
+            for t in range(W_e_in.shape[1]):
+                s += W_e_in[j, t] * trajectory[i + t]
+            h1[j] = s if s > 0.0 else 0.0
+
+        # Second encoder layer
+        for j in range(enc2_out):
+            s = b_e_hidden[j]
+            for t in range(W_e_hidden.shape[1]):
+                s += W_e_hidden[j, t] * h1[t]
+            h2[j] = s if s > 0.0 else 0.0
+
+        # Third encoder layer
+        for j in range(enc3_out):
+            s = b_e_out[j]
+            for t in range(W_e_out.shape[1]):
+                s += W_e_out[j, t] * h2[t]
+            val = s if s > 0.0 else 0.0
+            h3[j] = val
+            aggregated[j] += val
+
+    # Build head input [first_k, aggregated]
+    xlen = k + enc3_out
+    x_full = np.empty(xlen, dtype=np.float32)
+    for i in range(k):
+        x_full[i] = trajectory[i]
+    for j in range(enc3_out):
+        x_full[k + j] = aggregated[j]
+
+    # Head layer 1
+    h1_len = W_h_in.shape[0]
+    hh1 = np.empty(h1_len, dtype=np.float32)
+    for j in range(h1_len):
+        s = b_h_in[j]
+        for t in range(W_h_in.shape[1]):
+            s += W_h_in[j, t] * x_full[t]
+        hh1[j] = s if s > 0.0 else 0.0
+
+    # Head layer 2
+    h2_len = W_h1.shape[0]
+    hh2 = np.empty(h2_len, dtype=np.float32)
+    for j in range(h2_len):
+        s = b_h1[j]
+        for t in range(W_h1.shape[1]):
+            s += W_h1[j, t] * hh1[t]
+        hh2[j] = s if s > 0.0 else 0.0
+
+    # Head layer 3
+    h3_len = W_h2.shape[0]
+    hh3 = np.empty(h3_len, dtype=np.float32)
+    for j in range(h3_len):
+        s = b_h2[j]
+        for t in range(W_h2.shape[1]):
+            s += W_h2[j, t] * hh2[t]
+        hh3[j] = s if s > 0.0 else 0.0
+
+    # Output layer (linear)
+    out_len = W_h_out.shape[0]
+    out = np.empty(out_len, dtype=np.float32)
+    for j in range(out_len):
+        s = b_h_out[j]
+        for t in range(W_h_out.shape[1]):
+            s += W_h_out[j, t] * hh3[t]
+        out[j] = s
+
+    return out
 
 
 
@@ -144,14 +269,7 @@ class CalculateModelBasedDistance(CalculateDistance):
             self.pdf,
             np.zeros(n_right_points, dtype=float),
         ))
-        
-        # FOR TESTING PURPOSES
-        # plt.plot(grid, sim_pdf, linestyle="dotted")
-        # plt.plot(grid, real_pdf)
-        # plt.show()
-        # plt.plot(freqs, spectral_density2, linestyle="dotted")
-        # plt.plot(freqs, spectral_density1)
-        # plt.show()
+    
 
         # Compute integrated absolute differences, combine via IAE1 + alpha*IAE2
         pdf_distance = integrate.trapezoid(np.abs(real_pdf - sim_pdf), grid)
@@ -159,7 +277,6 @@ class CalculateModelBasedDistance(CalculateDistance):
         alpha = integrate.trapezoid(y = np.abs(spectral_density1), x = freqs)
 
         return spectral_density_distance + alpha*pdf_distance
-    
 
 
 
@@ -174,10 +291,35 @@ class CalculatePENDistance(CalculateDistance):
     # ----- 
     def _simulate_training_trajs(self, training_thetas, traj_initial_value, model_simulator, timestep, num_samples):
         print("Simulating training trajectories...")
-        training_trajs = []
-        for theta in training_thetas:
-            training_trajs.append(model_simulator(traj_initial_value, theta, timestep, num_samples))
-        training_trajs = np.array(training_trajs)
+        thetas = np.asarray(training_thetas)
+        if thetas.ndim == 1:
+            thetas = thetas.reshape(1, -1)
+
+        n_tasks = int(thetas.shape[0])
+
+        # Progress bar
+        from tqdm import tqdm
+
+        with ProcessPoolExecutor(
+            max_workers=None,
+            initializer=_pen_worker_init,
+            initargs=(traj_initial_value, timestep, num_samples, model_simulator),
+        ) as ex:
+            pbar = tqdm(total=n_tasks, desc="Training sims")
+            # Create at most 1000 futures by batching thetas
+            max_futures = 1000
+            n_batches = n_tasks if n_tasks < max_futures else max_futures
+            batch_size = (n_tasks + n_batches - 1) // n_batches
+            batches = [thetas[i:i+batch_size] for i in range(0, n_tasks, batch_size)]
+
+            results = []
+            for batch_res in ex.map(_pen_sim_worker, batches):
+                # batch_res is a list of trajectories
+                results.extend(batch_res)
+                pbar.update(len(batch_res))
+            pbar.close()
+        training_trajs = np.asarray(results, dtype=np.float32)
+
         print("finished!")
         return training_trajs
 
@@ -185,15 +327,16 @@ class CalculatePENDistance(CalculateDistance):
     # ----- Alternative Constructor -----
     def create_and_train_PEN(
             self, 
-            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep,  
+            model_simulator: callable, training_thetas, traj_initial_value, real_trajectory, timestep, dimension_weights, 
             markov_order = 1, 
             device_name = "cpu", batch_size=32, num_epochs=25,
-            early_stopping_patience=10, early_stopping_loss_drop=0.0, validation_split=0.1,
+            early_stopping_patience=10, early_stopping_loss_drop=0.0, validation_split=0.2,
             ):
         
         # Lazy imports to prevent torch dependency in instances of this class
         import torch
         import torch.nn as nn
+        import torch.nn.functional as F
         from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -317,11 +460,10 @@ class CalculatePENDistance(CalculateDistance):
             loader = DataLoader(dataset, batch_size=bs, shuffle=True)
             val_loader = None
         
-        # Define cost function
-        def mean_euclidean_squared(pred, target):
-            sample_loss = (pred - target).pow(2).sum(dim=1)
-            return sample_loss.mean()
-        
+        # Specify cost function
+        weights = torch.from_numpy(dimension_weights**2).to(device)
+        criterion = lambda pred, target: (F.mse_loss(pred, target, reduction="none")*weights).mean()
+
         # Specify optimiser for training
         optimizer = torch.optim.Adam(summaryNN.parameters(), lr=1e-3)
 
@@ -334,6 +476,7 @@ class CalculatePENDistance(CalculateDistance):
         summaryNN.train()
         best_loss = float("inf")
         no_improve = 0
+        best_state = None  # save best-performing model weights
         for epoch in range(num_epochs):
             epoch_loss = 0.0
             n_batches = 0
@@ -342,7 +485,7 @@ class CalculatePENDistance(CalculateDistance):
                 batch_y = batch_y.to(device)
 
                 preds = summaryNN(batch_x)
-                loss = mean_euclidean_squared(preds, batch_y)
+                loss = criterion(preds, batch_y)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -363,7 +506,7 @@ class CalculatePENDistance(CalculateDistance):
                         vx = vx.to(device)
                         vy = vy.to(device)
                         vp = summaryNN(vx)
-                        vloss = mean_euclidean_squared(vp, vy)
+                        vloss = criterion(vp, vy)
                         val_loss += float(vloss.detach().cpu().item())
                         val_batches += 1
                 val_avg = val_loss / max(1, val_batches)
@@ -383,10 +526,15 @@ class CalculatePENDistance(CalculateDistance):
                 print(f"  Improvement: best {best_loss:.6f} -> {current:.6f}")
                 best_loss = current
                 no_improve = 0
+                # Save the best model state whenever best improves
+                best_state = {k: v.detach().cpu().clone() for k, v in summaryNN.state_dict().items()}
             else:
                 no_improve += 1
                 if no_improve >= patience:
                     print(f"Early stopping at epoch {epoch+1}: best_loss={best_loss:.6f}, current={current:.6f}")
+                    # Restore best model weights before exiting training loop
+                    if best_state is not None:
+                        summaryNN.load_state_dict(best_state)
                     break
         summaryNN.eval()
         print("finished!")
@@ -415,6 +563,67 @@ class CalculatePENDistance(CalculateDistance):
         # ------ Call base constructor now that we can summarise ------
         super().__init__(real_trajectory, timestep)
 
+    # ----- Save/load trained PEN weights -----
+    def save_pen(self, filepath: str):
+        """Save trained PEN weights and markov order to a .npz file.
+
+        Args:
+            filepath: Destination path (e.g., "pen_weights.npz").
+        """
+        if self.layers is None or self.k is None:
+            raise RuntimeError("PEN not initialised. Train or load it before saving.")
+
+        # Flatten the layer dict for easy storage in NPZ
+        npz_dict = {"k": np.asarray(self.k, dtype=np.int32)}
+        for name, (W, b) in self.layers.items():
+            npz_dict[f"{name}_W"] = np.asarray(W, dtype=np.float32)
+            npz_dict[f"{name}_b"] = np.asarray(b, dtype=np.float32)
+
+        np.savez_compressed(filepath, **npz_dict)
+
+    @classmethod
+    def load_pen(cls, filepath: str, real_trajectory, timestep):
+        """Create a CalculatePENDistance instance from a saved .npz file.
+
+        Loads the trained PEN weights and configures the instance so it can be
+        used immediately as a distance calculator (summary of real_trajectory
+        is computed on construction).
+
+        Args:
+            filepath: Path to the saved .npz produced by save_pen.
+            real_trajectory: The reference trajectory to summarise.
+            timestep: Sampling interval of the trajectory.
+
+        Returns:
+            CalculatePENDistance: Configured instance ready for eval().
+        """
+        data = np.load(filepath)
+        # Reconstruct layers dict
+        expected = [
+            "encoder_in", "encoder_hidden", "encoder_out",
+            "head_in", "head_hidden1", "head_hidden2", "head_out",
+        ]
+
+        layers = {}
+        for name in expected:
+            W_key = f"{name}_W"
+            b_key = f"{name}_b"
+            if W_key not in data or b_key not in data:
+                raise ValueError(f"Missing keys '{W_key}'/'{b_key}' in saved PEN file")
+            layers[name] = (data[W_key].astype(np.float32), data[b_key].astype(np.float32))
+
+        if "k" not in data:
+            raise ValueError("Missing key 'k' (markov order) in saved PEN file")
+        k = int(np.asarray(data["k"]).item())
+
+        # Build and initialise instance
+        obj = cls()
+        obj.layers = layers
+        obj.k = k
+        # Call base initialiser to compute real-data summary using loaded PEN
+        CalculateDistance.__init__(obj, real_trajectory, timestep)
+        return obj
+
 
     # ------ Execute and return feed foward ------
     def _summarise(self, trajectory):
@@ -431,26 +640,25 @@ class CalculatePENDistance(CalculateDistance):
         if trajectory.size < self.k + 1:
             raise ValueError(f"Input length ({trajectory.size}) must be at least markov_order+1 ({self.k + 1}).")
 
-        # Create contiguous blocks for encoder
-        blocks = sliding_window_view(trajectory, window_shape = self.k+1)
+        # Numba-accelerated feed-forward
+        W_e_in, b_e_in = self.layers["encoder_in"]
+        W_e_h, b_e_h = self.layers["encoder_hidden"]
+        W_e_out, b_e_out = self.layers["encoder_out"]
+        W_h_in, b_h_in = self.layers["head_in"]
+        W_h1, b_h1 = self.layers["head_hidden1"]
+        W_h2, b_h2 = self.layers["head_hidden2"]
+        W_h_out, b_h_out = self.layers["head_out"]
 
-        # Extract weights and biases 
-        W, b = self.layers["encoder_in"]
-        blocks = ReLU(linear(blocks, W, b))
-        W, b = self.layers["encoder_hidden"]
-        blocks = ReLU(linear(blocks, W, b))
-        W, b = self.layers["encoder_out"]
-        blocks = ReLU(linear(blocks, W, b))
-
-        encoding = blocks.sum(axis=0)
-        first_k = trajectory[:self.k]
-        x = np.concatenate([first_k, encoding], axis=0)
-
-        W, b = self.layers["head_in"];       x = ReLU(linear(x, W, b)); 
-        W, b = self.layers["head_hidden1"];  x = ReLU(linear(x, W, b)); 
-        W, b = self.layers["head_hidden2"];  x = ReLU(linear(x, W, b)); 
-        W, b = self.layers["head_out"];      x = linear(x, W, b); 
-
+        return _pen_feedforward_jit(
+            trajectory, int(self.k),
+            W_e_in, b_e_in,
+            W_e_h, b_e_h,
+            W_e_out, b_e_out,
+            W_h_in, b_h_in,
+            W_h1, b_h1,
+            W_h2, b_h2,
+            W_h_out, b_h_out,
+        )
         return x
 
 
